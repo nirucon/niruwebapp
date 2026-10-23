@@ -338,6 +338,32 @@ fn launch(app: &App) {
         .unwrap_or_else(|e| die(&format!("cannot start {}: {e}", app.browser)));
 }
 
+fn cmdline_uses_profile(cmdline: &[u8], profile: &std::path::Path) -> bool {
+    let expected = format!("--user-data-dir={}", profile.display());
+    cmdline
+        .split(|byte| *byte == 0)
+        .any(|argument| argument == expected.as_bytes())
+}
+
+fn profile_in_use(profile: &std::path::Path) -> bool {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        let path = entry.path().join("cmdline");
+        if let Ok(cmdline) = fs::read(path) {
+            if cmdline_uses_profile(&cmdline, profile) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn remove(args: &[String]) {
     let query = args
         .first()
@@ -347,13 +373,25 @@ fn remove(args: &[String]) {
     let Some(index) = find(&apps, &query) else {
         die(&format!("webapp not found: {query}"))
     };
+    let delete_profile = args.iter().any(|arg| arg == "--delete-profile");
+    let profile = profiles_dir().join(&apps[index].id);
+    if delete_profile {
+        if profile_in_use(&profile) {
+            die(&format!(
+                "profile is in use by a running webapp; close it and retry: {}",
+                profile.display()
+            ));
+        }
+        if profile.exists() {
+            fs::remove_dir_all(&profile).unwrap_or_else(|e| {
+                die(&format!("cannot remove profile {}: {e}", profile.display()))
+            });
+        }
+    }
     let app = apps.remove(index);
     remove_icon(&app);
     let _ = fs::remove_file(desktop_dir().join(format!("niruwebapp-{}.desktop", app.id)));
     let _ = fs::remove_file(apps_dir().join(format!("{}.toml", app.id)));
-    if args.iter().any(|arg| arg == "--delete-profile") {
-        let _ = fs::remove_dir_all(profiles_dir().join(&app.id));
-    }
     save(&apps);
     println!("removed {}", app.name);
 }
@@ -458,6 +496,19 @@ mod tests {
         assert_eq!(slug("YouTube Music"), "youtube-music");
         assert_eq!(slug("SVTRadio 24/7"), "svtradio-24-7");
     }
+    #[test]
+    fn profile_ownership_is_matched_on_the_full_argument() {
+        let profile = std::path::Path::new("/tmp/profile x");
+        assert!(cmdline_uses_profile(
+            b"helium\0--user-data-dir=/tmp/profile x\0",
+            profile
+        ));
+        assert!(!cmdline_uses_profile(
+            b"helium\0--user-data-dir=/tmp/profile x-other\0",
+            profile
+        ));
+    }
+
     #[test]
     fn urls_are_strictly_http() {
         assert!(validate_url("https://example.com").is_ok());

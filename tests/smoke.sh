@@ -9,7 +9,7 @@ cat > "$T/bin/helium" <<'BROWSER'
 printf '%s\n' "$*" >> "$HOME/browser-args"
 BROWSER
 chmod +x "$T/bin/helium"
-"$BIN" --version | grep -qx 'NIRUWEBAPP 0.1.2'
+"$BIN" --version | grep -qx 'NIRUWEBAPP 0.1.3'
 printf '\211PNG\r\n\032\n' > "$T/icon.png"
 "$BIN" create 'Example App' 'https://example.com' --icon "$T/icon.png"
 [ -f "$T/data/applications/niruwebapp-example-app.desktop" ]
