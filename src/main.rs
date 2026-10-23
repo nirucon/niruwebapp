@@ -60,7 +60,8 @@ fn usage() {
     println!("  list");
     println!("  launch ID|NAME");
     println!("  remove ID|NAME [--delete-profile]");
-    println!("  edit ID|NAME [--name NAME] [--url URL]");
+    println!("  edit ID|NAME [--name NAME] [--url URL] [--icon PATH]");
+    println!("  icon ID|NAME PATH");
 }
 
 fn slug(name: &str) -> String {
@@ -244,6 +245,36 @@ fn parse_value(args: &[String], name: &str) -> Option<String> {
         .cloned()
 }
 
+fn install_icon(source: &Path, id: &str, previous: Option<&str>) -> String {
+    if !source.is_file() {
+        die(&format!("icon not found: {}", source.display()));
+    }
+    let extension = source
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .filter(|ext| matches!(ext.as_str(), "png" | "svg" | "xpm" | "jpg" | "jpeg"))
+        .unwrap_or_else(|| die("icon must be PNG, SVG, XPM or JPEG"));
+    let _ = fs::create_dir_all(icons_dir());
+    let target = icons_dir().join(format!("niruwebapp-{id}.{extension}"));
+    let target_text = target.to_string_lossy().to_string();
+    if previous != Some(target_text.as_str()) {
+        if let Some(old) = previous {
+            let _ = fs::remove_file(old);
+        }
+    }
+    fs::copy(source, &target).unwrap_or_else(|e| die(&format!("copy icon: {e}")));
+    target_text
+}
+
+fn remove_icon(app: &App) {
+    if let Some(icon) = &app.icon {
+        if Path::new(icon).starts_with(icons_dir()) {
+            let _ = fs::remove_file(icon);
+        }
+    }
+}
+
 fn create(args: &[String]) {
     let name = args
         .first()
@@ -257,16 +288,6 @@ fn create(args: &[String]) {
     validate_url(&url).unwrap_or_else(|e| fail(&e));
     let browser = find_browser(parse_value(args, "--browser").as_deref());
     let shared_profile = args.iter().any(|arg| arg == "--shared-profile");
-    let icon = parse_value(args, "--icon").map(|source| {
-        let source = PathBuf::from(source);
-        if !source.is_file() {
-            die(&format!("icon not found: {}", source.display()));
-        }
-        let _ = fs::create_dir_all(icons_dir());
-        let target = icons_dir().join(format!("niruwebapp-{}.png", slug(&name)));
-        fs::copy(&source, &target).unwrap_or_else(|e| die(&format!("copy icon: {e}")));
-        target.to_string_lossy().to_string()
-    });
     let mut apps = load();
     let base = slug(&name);
     let mut id = base.clone();
@@ -275,6 +296,8 @@ fn create(args: &[String]) {
         id = format!("{base}-{n}");
         n += 1;
     }
+    let icon =
+        parse_value(args, "--icon").map(|source| install_icon(Path::new(&source), &id, None));
     let app = App {
         id,
         name,
@@ -325,6 +348,7 @@ fn remove(args: &[String]) {
         die(&format!("webapp not found: {query}"))
     };
     let app = apps.remove(index);
+    remove_icon(&app);
     let _ = fs::remove_file(desktop_dir().join(format!("niruwebapp-{}.desktop", app.id)));
     let _ = fs::remove_file(apps_dir().join(format!("{}.toml", app.id)));
     if args.iter().any(|arg| arg == "--delete-profile") {
@@ -332,6 +356,30 @@ fn remove(args: &[String]) {
     }
     save(&apps);
     println!("removed {}", app.name);
+}
+
+fn set_icon(args: &[String]) {
+    let query = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| fail("icon needs ID or NAME and PATH"));
+    let source = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| fail("icon needs ID or NAME and PATH"));
+    let mut apps = load();
+    let Some(index) = find(&apps, &query) else {
+        die(&format!("webapp not found: {query}"))
+    };
+    let previous = apps[index].icon.clone();
+    apps[index].icon = Some(install_icon(
+        Path::new(&source),
+        &apps[index].id,
+        previous.as_deref(),
+    ));
+    desktop(&apps[index]);
+    save(&apps);
+    println!("updated icon for {}", apps[index].name);
 }
 
 fn edit(args: &[String]) {
@@ -350,6 +398,14 @@ fn edit(args: &[String]) {
     if let Some(url) = parse_value(args, "--url") {
         validate_url(&url).unwrap_or_else(|e| fail(&e));
         apps[index].url = url;
+    }
+    if let Some(source) = parse_value(args, "--icon") {
+        let previous = apps[index].icon.clone();
+        apps[index].icon = Some(install_icon(
+            Path::new(&source),
+            &apps[index].id,
+            previous.as_deref(),
+        ));
     }
     desktop(&apps[index]);
     save(&apps);
@@ -386,6 +442,7 @@ fn main() {
         }
         "remove" => remove(&args[1..]),
         "edit" => edit(&args[1..]),
+        "icon" => set_icon(&args[1..]),
         _ => {
             usage();
             std::process::exit(2);
