@@ -122,16 +122,19 @@ fn browser_candidates() -> &'static [&'static str] {
     ]
 }
 
+fn browser_available(candidate: &str) -> bool {
+    Path::new(candidate).is_file()
+        || Command::new(candidate)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+}
+
 fn find_browser(explicit: Option<&str>) -> String {
     if let Some(path) = explicit {
-        if Path::new(path).is_file()
-            || Command::new(path)
-                .arg("--version")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok()
-        {
+        if browser_available(path) {
             return path.to_string();
         }
         die(&format!("browser not found: {path}"));
@@ -141,18 +144,32 @@ fn find_browser(explicit: Option<&str>) -> String {
             return find_browser(Some(&path));
         }
     }
+    let local_bin = home().join(".local/bin");
     for candidate in browser_candidates() {
-        if Command::new(candidate)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
-        {
+        let local = local_bin.join(candidate);
+        if local.is_file() {
+            return local.to_string_lossy().to_string();
+        }
+        if browser_available(candidate) {
             return candidate.to_string();
         }
     }
     die("no supported browser found (Helium/Chromium). Install one or use --browser.");
+}
+
+fn desktop_exec() -> String {
+    let stable = home().join(".local/bin/niruwebapp");
+    let path = if stable.is_file() {
+        stable
+    } else {
+        env::current_exe().unwrap_or_else(|_| PathBuf::from("niruwebapp"))
+    };
+    let text = path.to_string_lossy().to_string();
+    if text.chars().any(char::is_whitespace) {
+        format!("\"{}\"", text.replace('"', "\\\""))
+    } else {
+        text
+    }
 }
 
 fn load() -> Vec<App> {
@@ -209,8 +226,8 @@ fn desktop(app: &App) {
     let path = desktop_dir().join(format!("niruwebapp-{}.desktop", app.id));
     let icon = app.icon.as_deref().unwrap_or("web-browser");
     let entry = format!(
-        "[Desktop Entry]\nType=Application\nName={}\nComment=Webapp\nExec=niruwebapp launch {}\nIcon={}\nTerminal=false\nCategories=Network;WebBrowser;\nStartupWMClass=niruwebapp-{}\n",
-        app.name.replace(['\n', '\r'], " "), app.id, icon, app.id
+        "[Desktop Entry]\nType=Application\nName={}\nComment=Webapp\nExec={} launch {}\nIcon={}\nTerminal=false\nCategories=Network;WebBrowser;\nStartupWMClass=niruwebapp-{}\n",
+        app.name.replace(['\n', '\r'], " "), desktop_exec(), app.id, icon, app.id
     );
     fs::write(&path, entry).unwrap_or_else(|e| die(&format!("write {}: {e}", path.display())));
 }

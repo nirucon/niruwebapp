@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-VERSION="0.1.0"
+VERSION="0.1.1"
 REPO="${NIRUWEBAPP_REPO:-nirucon/niruwebapp}"
 PREFIX="${NIRUWEBAPP_PREFIX:-${NIRU_PREFIX:-$HOME/.local}}"
 BIN="$PREFIX/bin"

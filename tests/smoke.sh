@@ -9,13 +9,13 @@ cat > "$T/bin/helium" <<'BROWSER'
 printf '%s\n' "$*" >> "$HOME/browser-args"
 BROWSER
 chmod +x "$T/bin/helium"
-"$BIN" --version | grep -qx 'NIRUWEBAPP 0.1.0'
+"$BIN" --version | grep -qx 'NIRUWEBAPP 0.1.1'
 "$BIN" create 'Example App' 'https://example.com'
 [ -f "$T/data/applications/niruwebapp-example-app.desktop" ]
 "$BIN" list | grep -q '^example-app.*Example App.*https://example.com$'
 "$BIN" launch example-app
 grep -q -- '--app=https://example.com' "$HOME/browser-args"
-grep -q '^Exec=niruwebapp launch example-app$' "$T/data/applications/niruwebapp-example-app.desktop"
+grep -q 'launch example-app$' "$T/data/applications/niruwebapp-example-app.desktop"
 "$BIN" remove example-app
 [ ! -e "$T/data/applications/niruwebapp-example-app.desktop" ]
 echo 'PASS: create/list/launch/remove and browser args'
