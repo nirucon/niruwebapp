@@ -42,6 +42,24 @@ A shared profile is useful for Microsoft 365 and other sites where sign-in
 should follow the ordinary browser session. The trade-off is that cookies and
 sessions are shared with normal browsing.
 
+### Microsoft 365 sign-in
+
+Teams uses a third-party authentication frame. If the browser blocks
+third-party cookies, Teams can show “We need you to sign in again” and its
+Sign in button may do nothing. Keep the global setting on “Block third-party
+cookies” and add these sites to “Sites allowed to use third-party cookies”:
+
+- `[*.]cloud.microsoft`
+- `[*.]microsoft.com`
+- `[*.]microsoftonline.com`
+- `[*.]office.com`
+- `[*.]live.com`
+- `[*.]sharepoint.com`
+- `[*.]onedrive.com`
+
+The exceptions live in the browser profile, so they apply to both normal
+browsing and every webapp that uses the shared profile.
+
 `--browser PATH` selects a backend; otherwise Helium, Chromium, Chrome or Brave
 is detected. No browser is installed automatically. `--icon PATH` copies a
 local icon.
