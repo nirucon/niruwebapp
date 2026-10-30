@@ -24,14 +24,23 @@ niruwebapp create "YouTube Music" https://music.youtube.com
 niruwebapp list
 niruwebapp launch "YouTube Music"
 niruwebapp edit youtube-music --name "YT Music"
+niruwebapp edit youtube-music --shared-profile
+niruwebapp edit youtube-music --isolated-profile
 niruwebapp remove youtube-music --delete-profile
 ```
 
 Each webapp gets an ordinary desktop entry under
 `~/.local/share/applications/` and a dedicated browser profile under
 `~/.local/share/niruwebapp/profiles/`. Use `--shared-profile` to use the
-browser's ordinary profile instead. Removing the launcher keeps the profile
-unless `--delete-profile` is explicit.
+browser's ordinary profile instead. An existing webapp can be switched between
+the two modes with `edit --shared-profile` or `edit --isolated-profile`; the old
+profile is kept on disk so switching back is non-destructive. Restart the
+webapp after switching. Removing the launcher keeps the profile unless
+`--delete-profile` is explicit.
+
+A shared profile is useful for Microsoft 365 and other sites where sign-in
+should follow the ordinary browser session. The trade-off is that cookies and
+sessions are shared with normal browsing.
 
 `--browser PATH` selects a backend; otherwise Helium, Chromium, Chrome or Brave
 is detected. No browser is installed automatically. `--icon PATH` copies a

@@ -61,6 +61,7 @@ fn usage() {
     println!("  launch ID|NAME");
     println!("  remove ID|NAME [--delete-profile]");
     println!("  edit ID|NAME [--name NAME] [--url URL] [--icon PATH]");
+    println!("       [--shared-profile | --isolated-profile]");
     println!("  icon ID|NAME PATH");
 }
 
@@ -243,6 +244,17 @@ fn parse_value(args: &[String], name: &str) -> Option<String> {
         .position(|arg| arg == name)
         .and_then(|index| args.get(index + 1))
         .cloned()
+}
+
+fn profile_mode_from_args(args: &[String]) -> Result<Option<bool>, &'static str> {
+    let shared = args.iter().any(|arg| arg == "--shared-profile");
+    let isolated = args.iter().any(|arg| arg == "--isolated-profile");
+    match (shared, isolated) {
+        (true, true) => Err("choose either --shared-profile or --isolated-profile"),
+        (true, false) => Ok(Some(true)),
+        (false, true) => Ok(Some(false)),
+        (false, false) => Ok(None),
+    }
 }
 
 fn install_icon(source: &Path, id: &str, previous: Option<&str>) -> String {
@@ -445,9 +457,29 @@ fn edit(args: &[String]) {
             previous.as_deref(),
         ));
     }
+    let mut profile_changed = false;
+    match profile_mode_from_args(args) {
+        Ok(Some(shared)) => {
+            if shared != apps[index].shared_profile {
+                apps[index].shared_profile = shared;
+                profile_changed = true;
+            }
+            if !shared {
+                let _ = fs::create_dir_all(profiles_dir().join(&apps[index].id));
+            }
+        }
+        Ok(None) => {}
+        Err(message) => fail(message),
+    }
     desktop(&apps[index]);
     save(&apps);
     println!("updated {}", apps[index].name);
+    if profile_changed {
+        eprintln!(
+            "note: restart {} for the new profile mode to take effect",
+            apps[index].name
+        );
+    }
 }
 
 fn main() {
@@ -514,5 +546,27 @@ mod tests {
         assert!(validate_url("https://example.com").is_ok());
         assert!(validate_url("file:///tmp/x").is_err());
         assert!(validate_url("https://example.com/a b").is_err());
+    }
+
+    #[test]
+    fn profile_mode_flags_are_exclusive() {
+        let args = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| item.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(profile_mode_from_args(&args(&[])), Ok(None));
+        assert_eq!(
+            profile_mode_from_args(&args(&["--shared-profile"])),
+            Ok(Some(true))
+        );
+        assert_eq!(
+            profile_mode_from_args(&args(&["--isolated-profile"])),
+            Ok(Some(false))
+        );
+        assert!(
+            profile_mode_from_args(&args(&["--shared-profile", "--isolated-profile"])).is_err()
+        );
     }
 }
