@@ -286,9 +286,15 @@ fn save(apps: &[App]) {
 
 fn desktop_text(app: &App) -> String {
     let exec = desktop_exec();
+    // The host tells webapps apart in launchers and makes them searchable by
+    // domain.
+    let comment = match class::display_host(&app.url) {
+        Some(host) => format!("Webapp · {host}"),
+        None => "Webapp".to_string(),
+    };
     desktop::Entry {
         name: &app.name,
-        comment: "Webapp",
+        comment: &comment,
         exec: &[&exec, "launch", &app.id],
         icon: app.icon.as_deref().unwrap_or("web-browser"),
         wm_class: &app.expected_class(),

@@ -32,6 +32,8 @@ wait_for_launch 1
 grep -q -- '--app=https://example.com' "$HOME/browser-args"
 grep -q -- '--user-data-dir=.*/profiles/example-app' "$HOME/browser-args"
 grep -q 'launch example-app$' "$T/data/applications/niruwebapp-example-app.desktop"
+grep -qx 'Comment=Webapp · example.com' "$T/data/applications/niruwebapp-example-app.desktop"
+grep -qx 'Categories=Network;WebBrowser;' "$T/data/applications/niruwebapp-example-app.desktop"
 
 "$BIN" edit example-app --shared-profile
 awk -F '\t' '$1 == "example-app" && $5 == "shared" { found = 1 } END { exit !found }' "$T/data/niruwebapp/apps.tsv"

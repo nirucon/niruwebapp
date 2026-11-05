@@ -46,6 +46,27 @@ pub fn url_parts(url: &str) -> Option<UrlParts> {
     Some(UrlParts { host, path })
 }
 
+/// The host as the user wrote it (lowercase, Unicode kept, no port or
+/// userinfo), for display and search.
+pub fn display_host(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = rest[..end].rsplit('@').next().unwrap_or("");
+    let host = if authority.starts_with('[') {
+        &authority[..=authority.find(']')?]
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    let host: String = host
+        .trim_end_matches('.')
+        .chars()
+        .flat_map(char::to_lowercase)
+        .collect();
+    (!host.is_empty()).then_some(host)
+}
+
 /// The URL with an IDN host as punycode and every non-ASCII byte
 /// percent-encoded. Chromium does not open an app window for a raw Unicode
 /// `--app=` argument, so the browser always gets this form.
@@ -389,6 +410,20 @@ mod tests {
             app_instance(&ascii_url("https://münchen.de/straße")),
             app_instance("https://münchen.de/straße")
         );
+    }
+
+    #[test]
+    fn display_host_keeps_what_the_user_wrote() {
+        assert_eq!(
+            display_host("https://Teams.Cloud.Microsoft/").as_deref(),
+            Some("teams.cloud.microsoft")
+        );
+        assert_eq!(
+            display_host("https://u:p@bücher.de:8443/x").as_deref(),
+            Some("bücher.de")
+        );
+        assert_eq!(display_host("https://[::1]:80/").as_deref(), Some("[::1]"));
+        assert_eq!(display_host("ftp://x"), None);
     }
 
     #[test]
