@@ -1,4 +1,5 @@
 mod class;
+mod desktop;
 mod icon;
 mod x11;
 
@@ -222,6 +223,7 @@ fn find_browser(explicit: Option<&str>) -> String {
     die("no supported browser found (Helium/Chromium). Install one or use --browser.");
 }
 
+/// The program desktop entries run: the stable NIRUX link when present.
 fn desktop_exec() -> String {
     let stable = home().join(".local/bin/niruwebapp");
     let path = if stable.is_file() {
@@ -229,12 +231,7 @@ fn desktop_exec() -> String {
     } else {
         env::current_exe().unwrap_or_else(|_| PathBuf::from("niruwebapp"))
     };
-    let text = path.to_string_lossy().to_string();
-    if text.chars().any(char::is_whitespace) {
-        format!("\"{}\"", text.replace('"', "\\\""))
-    } else {
-        text
-    }
+    path.to_string_lossy().to_string()
 }
 
 fn load() -> Vec<App> {
@@ -287,20 +284,24 @@ fn save(apps: &[App]) {
     fs::rename(&temp, state_path()).unwrap_or_else(|e| die(&format!("activate state: {e}")));
 }
 
+fn desktop_text(app: &App) -> String {
+    let exec = desktop_exec();
+    desktop::Entry {
+        name: &app.name,
+        comment: "Webapp",
+        exec: &[&exec, "launch", &app.id],
+        icon: app.icon.as_deref().unwrap_or("web-browser"),
+        wm_class: &app.expected_class(),
+    }
+    .text()
+}
+
 fn desktop(app: &App) {
     let _ = fs::create_dir_all(desktop_dir());
     let _ = fs::create_dir_all(apps_dir());
     let path = app.desktop_path();
-    let icon = app.icon.as_deref().unwrap_or("web-browser");
-    let entry = format!(
-        "[Desktop Entry]\nType=Application\nName={}\nComment=Webapp\nExec={} launch {}\nIcon={}\nTerminal=false\nCategories=Network;WebBrowser;\nStartupWMClass={}\n",
-        app.name.replace(['\n', '\r'], " "),
-        desktop_exec(),
-        app.id,
-        icon,
-        app.expected_class()
-    );
-    fs::write(&path, entry).unwrap_or_else(|e| die(&format!("write {}: {e}", path.display())));
+    icon::write_atomic(&path, desktop_text(app).as_bytes())
+        .unwrap_or_else(|e| die(&format!("write {}: {e}", path.display())));
 }
 
 /// Read-only report: every webapp, its expected class, and whether a window
@@ -317,9 +318,7 @@ fn doctor(apps: &[App]) {
             .as_ref()
             .map(|list| list.iter().filter(|w| app.owns_window(w)).count());
         let entry = match fs::read_to_string(app.desktop_path()) {
-            Ok(text) if text.contains(&format!("\nStartupWMClass={}\n", app.expected_class())) => {
-                "ok"
-            }
+            Ok(text) if text == desktop_text(app) => "ok",
             Ok(_) => "stale",
             Err(_) => "missing",
         };

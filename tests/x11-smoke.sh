@@ -12,7 +12,7 @@ T=$(mktemp -d)
 PIDS=
 cleanup() { for p in $PIDS; do kill "$p" 2>/dev/null || :; done; rm -rf "$T"; }
 trap cleanup EXIT
-export HOME=$T/home XDG_DATA_HOME=$T/data XDG_RUNTIME_DIR=$T/run PATH=$T/bin:$PATH
+export HOME=$T/home XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config XDG_RUNTIME_DIR=$T/run PATH=$T/bin:$PATH
 mkdir -p "$HOME" "$T/bin" "$XDG_RUNTIME_DIR"
 cat > "$T/bin/helium" <<'BROWSER'
 #!/bin/sh

@@ -2,7 +2,7 @@
 set -eu
 BIN=${1:?usage: smoke.sh BIN}
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-export HOME=$T/home XDG_DATA_HOME=$T/data PATH=$T/bin:$PATH
+export HOME=$T/home XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config XDG_RUNTIME_DIR=$T/run PATH=$T/bin:$PATH
 mkdir -p "$HOME" "$T/bin"
 cat > "$T/bin/helium" <<'BROWSER'
 #!/bin/sh
@@ -54,6 +54,15 @@ if "$BIN" edit example-app --shared-profile --isolated-profile 2>/dev/null; then
   exit 1
 fi
 
+# B4: Desktop Entry escaping of names and of an Exec path with reserved
+# characters (space, %, $).
+"$BIN" create 'Smör 100% "$x" \ `y`' https://example.org/ >/dev/null
+grep -qxF 'Name=Smör 100% "$x" \\ `y`' "$T/data/applications/niruwebapp-sm-r-100-x-y.desktop"
+mkdir -p "$T/odd dir 100%\$"
+cp "$BIN" "$T/odd dir 100%\$/niruwebapp"
+"$T/odd dir 100%\$/niruwebapp" edit sm-r-100-x-y >/dev/null
+grep -qxF "Exec=\"$T/odd dir 100%%\\\\\$/niruwebapp\" launch sm-r-100-x-y" "$T/data/applications/niruwebapp-sm-r-100-x-y.desktop"
+"$BIN" remove sm-r-100-x-y >/dev/null
 "$BIN" icon example-app "$T/icon.png"
 "$BIN" remove example-app
 [ ! -e "$T/data/applications/niruwebapp-example-app.desktop" ]
