@@ -13,5 +13,18 @@ jobs:
       - run: cargo test --locked
       - run: cargo build --release --locked --bins --examples
       - run: sh tests/smoke.sh target/release/niruwebapp
-      - run: sudo apt-get update && sudo apt-get install -y xvfb
+      - run: sudo apt-get update && sudo apt-get install -y xvfb x11-utils
       - run: sh tests/x11-smoke.sh target/release/niruwebapp target/release/examples/x11-dummy | tee x11.log && grep -q PASS x11.log
+      - name: Window classes against a real Chrome
+        run: |
+          browser=$(command -v google-chrome-stable || command -v google-chrome || command -v chromium)
+          printf '#!/bin/sh\nexec %s --no-sandbox --disable-gpu "$@"\n' "$browser" > "$RUNNER_TEMP/chrome"
+          chmod +x "$RUNNER_TEMP/chrome"
+          sh tests/browser-class.sh target/release/niruwebapp "$RUNNER_TEMP/chrome"
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - run: cargo test --locked
+      - run: cargo build --release --locked

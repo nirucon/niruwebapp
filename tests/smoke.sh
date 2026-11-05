@@ -21,7 +21,7 @@ wait_for_launch() {
   echo "browser launch did not produce argument line $want" >&2
   return 1
 }
-"$BIN" --version | grep -qx 'NIRUWEBAPP 0.1.4'
+"$BIN" --version | grep -qx 'NIRUWEBAPP 0.2.0'
 printf '\211PNG\r\n\032\n' > "$T/icon.png"
 "$BIN" create 'Example App' 'https://example.com' --icon "$T/icon.png"
 [ -f "$T/data/applications/niruwebapp-example-app.desktop" ]
