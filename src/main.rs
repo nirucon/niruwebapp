@@ -1,4 +1,5 @@
 mod class;
+mod icon;
 mod x11;
 
 use std::{
@@ -15,6 +16,36 @@ struct App {
     browser: String,
     shared_profile: bool,
     icon: Option<String>,
+    icon_kind: IconKind,
+}
+
+/// Where an app's icon came from. Stored as the seventh state column; older
+/// rows without it are `Legacy` (a user icon, or the generic browser icon).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum IconKind {
+    Legacy,
+    Letter,
+    User,
+    Fetched,
+}
+
+impl IconKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            IconKind::Legacy => "",
+            IconKind::Letter => "letter",
+            IconKind::User => "user",
+            IconKind::Fetched => "fetched",
+        }
+    }
+    fn parse(text: &str) -> Self {
+        match text {
+            "letter" => IconKind::Letter,
+            "user" => IconKind::User,
+            "fetched" => IconKind::Fetched,
+            _ => IconKind::Legacy,
+        }
+    }
 }
 
 impl App {
@@ -65,6 +96,11 @@ fn desktop_dir() -> PathBuf {
 fn icons_dir() -> PathBuf {
     data_home().join("icons/hicolor/128x128/apps")
 }
+fn config_home() -> PathBuf {
+    env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".config"))
+}
 fn state_path() -> PathBuf {
     state_dir().join("apps.tsv")
 }
@@ -80,13 +116,15 @@ fn die(message: &str) -> ! {
 
 fn usage() {
     println!("Usage: niruwebapp <command> [arguments]");
-    println!("  create NAME URL [--browser PATH] [--shared-profile] [--icon PATH]");
+    println!("  create NAME URL [--browser PATH] [--shared-profile]");
+    println!("       [--icon PATH | --fetch-icon]");
     println!("  list");
     println!("  launch ID|NAME [--new-window]");
     println!("  remove ID|NAME [--delete-profile]");
-    println!("  edit ID|NAME [--name NAME] [--url URL] [--icon PATH]");
+    println!("  edit ID|NAME [--name NAME] [--url URL] [--icon PATH | --fetch-icon]");
     println!("       [--shared-profile | --isolated-profile]");
     println!("  icon ID|NAME PATH");
+    println!("  refresh            regenerate letter icons and desktop entries");
     println!("  doctor");
 }
 
@@ -216,6 +254,7 @@ fn load() -> Vec<App> {
             browser: fields[3].into(),
             shared_profile: fields[4] == "shared",
             icon: fields.get(5).filter(|s| !s.is_empty()).map(|s| (*s).into()),
+            icon_kind: IconKind::parse(fields.get(6).copied().unwrap_or("")),
         });
     }
     apps
@@ -228,7 +267,7 @@ fn save(apps: &[App]) {
         .iter()
         .map(|app| {
             format!(
-                "{}\t{}\t{}\t{}\t{}\t{}\n",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 app.id,
                 app.name,
                 app.url,
@@ -238,7 +277,8 @@ fn save(apps: &[App]) {
                 } else {
                     "profile"
                 },
-                app.icon.as_deref().unwrap_or("")
+                app.icon.as_deref().unwrap_or(""),
+                app.icon_kind.as_str()
             )
         })
         .collect();
@@ -377,6 +417,124 @@ fn remove_icon(app: &App) {
     }
 }
 
+fn letter_icon_path(id: &str) -> PathBuf {
+    icons_dir().join(format!("niruwebapp-{id}.png"))
+}
+
+/// Point the app at its own icon file, removing a previous one we own.
+fn adopt_icon(app: &mut App, path: &Path, kind: IconKind) {
+    let path = path.to_string_lossy().to_string();
+    if let Some(old) = app.icon.as_deref().filter(|old| *old != path) {
+        if Path::new(old).starts_with(icons_dir()) {
+            let _ = fs::remove_file(old);
+        }
+    }
+    app.icon = Some(path);
+    app.icon_kind = kind;
+}
+
+/// Switch the app to a letter icon; `paint_letter_icons` draws it.
+fn use_letter_icon(app: &mut App) {
+    adopt_icon(app, &letter_icon_path(&app.id), IconKind::Letter);
+}
+
+/// Draw every letter icon in the current accent colour. Labels depend on the
+/// other names (a shared first letter gets a second letter), so this runs
+/// after every change to the set of names.
+fn paint_letter_icons(apps: &[App]) {
+    let mut painter = None;
+    for app in apps.iter().filter(|app| app.icon_kind == IconKind::Letter) {
+        let others = apps
+            .iter()
+            .filter(|other| other.id != app.id)
+            .map(|other| other.name.as_str());
+        let label = icon::label_for(&app.name, others);
+        let painter =
+            painter.get_or_insert_with(|| icon::Painter::new(icon::accent(&config_home())));
+        if let Err(e) = painter.write(&letter_icon_path(&app.id), &label) {
+            eprintln!("niruwebapp: cannot write icon for {}: {e}", app.id);
+        }
+    }
+}
+
+/// `--fetch-icon`: the explicit opt-in network request. Keeps the current
+/// icon (or a letter icon) when nothing usable is found.
+fn fetch_icon(app: &mut App) {
+    let Some(host) = class::url_parts(&app.url).map(|parts| parts.host) else {
+        return use_letter_icon(app);
+    };
+    match icon::fetch_site_icon(&host) {
+        Ok(png) => {
+            let path = letter_icon_path(&app.id);
+            icon::write_atomic(&path, &png).unwrap_or_else(|e| die(&format!("write icon: {e}")));
+            adopt_icon(app, &path, IconKind::Fetched);
+            println!("fetched icon from {host}");
+        }
+        Err(e) => {
+            eprintln!("niruwebapp: no icon fetched from {host} ({e}); keeping the local icon");
+            if app.icon.is_none() {
+                use_letter_icon(app);
+            }
+        }
+    }
+}
+
+/// Give pre-0.2 rows without an icon a letter icon, redraw the letter icons
+/// and rewrite every desktop entry.
+fn refresh_apps(apps: &mut [App]) {
+    for app in apps.iter_mut() {
+        match app.icon_kind {
+            IconKind::Legacy if app.icon.is_none() => use_letter_icon(app),
+            IconKind::Legacy => app.icon_kind = IconKind::User,
+            _ => {}
+        }
+    }
+    paint_letter_icons(apps);
+    for app in apps.iter() {
+        desktop(app);
+    }
+    save(apps);
+}
+
+const STATE_FORMAT: &str = "2";
+
+/// One-time, idempotent upgrade of pre-0.2 state: back up the state file and
+/// every desktop entry, give icon-less apps a letter icon, and rewrite the
+/// entries through `desktop()` (new class, comment and escaping).
+fn migrate_if_needed() {
+    let marker = state_dir().join("format");
+    if !state_path().exists()
+        || fs::read_to_string(&marker).is_ok_and(|text| text.trim() == STATE_FORMAT)
+    {
+        return;
+    }
+    let mut apps = load();
+    let backup = state_dir().join("backup-0.1");
+    if fs::create_dir(&backup).is_ok() {
+        let _ = fs::copy(state_path(), backup.join("apps.tsv"));
+        for app in &apps {
+            let entry = app.desktop_path();
+            if let Some(name) = entry.file_name() {
+                let _ = fs::copy(&entry, backup.join(name));
+            }
+        }
+    }
+    refresh_apps(&mut apps);
+    if let Err(e) = fs::write(&marker, format!("{STATE_FORMAT}\n")) {
+        eprintln!("niruwebapp: cannot record state format: {e}");
+        return;
+    }
+    eprintln!(
+        "niruwebapp: upgraded {} webapp(s); backup in {}",
+        apps.len(),
+        backup.display()
+    );
+}
+
+fn mark_state_current() {
+    let _ = fs::write(state_dir().join("format"), format!("{STATE_FORMAT}\n"));
+}
+
 fn create(args: &[String]) {
     let name = args
         .first()
@@ -398,22 +556,36 @@ fn create(args: &[String]) {
         id = format!("{base}-{n}");
         n += 1;
     }
-    let icon =
+    let user_icon =
         parse_value(args, "--icon").map(|source| install_icon(Path::new(&source), &id, None));
-    let app = App {
+    let mut app = App {
         id,
         name,
         url,
         browser,
         shared_profile,
-        icon,
+        icon_kind: if user_icon.is_some() {
+            IconKind::User
+        } else {
+            IconKind::Letter
+        },
+        icon: user_icon,
     };
+    if app.icon.is_none() {
+        if args.iter().any(|arg| arg == "--fetch-icon") {
+            fetch_icon(&mut app);
+        } else {
+            use_letter_icon(&mut app);
+        }
+    }
     if !app.shared_profile {
         let _ = fs::create_dir_all(profiles_dir().join(&app.id));
     }
     desktop(&app);
     apps.push(app.clone());
+    paint_letter_icons(&apps);
     save(&apps);
+    mark_state_current();
     println!("created {} ({})", app.name, app.id);
 }
 
@@ -559,6 +731,7 @@ fn remove(args: &[String]) {
     remove_icon(&app);
     let _ = fs::remove_file(app.desktop_path());
     let _ = fs::remove_file(apps_dir().join(format!("{}.toml", app.id)));
+    paint_letter_icons(&apps);
     save(&apps);
     println!("removed {}", app.name);
 }
@@ -582,6 +755,7 @@ fn set_icon(args: &[String]) {
         &apps[index].id,
         previous.as_deref(),
     ));
+    apps[index].icon_kind = IconKind::User;
     desktop(&apps[index]);
     save(&apps);
     println!("updated icon for {}", apps[index].name);
@@ -611,6 +785,9 @@ fn edit(args: &[String]) {
             &apps[index].id,
             previous.as_deref(),
         ));
+        apps[index].icon_kind = IconKind::User;
+    } else if args.iter().any(|arg| arg == "--fetch-icon") {
+        fetch_icon(&mut apps[index]);
     }
     let mut profile_changed = false;
     match profile_mode_from_args(args) {
@@ -626,6 +803,7 @@ fn edit(args: &[String]) {
         Ok(None) => {}
         Err(message) => fail(message),
     }
+    paint_letter_icons(&apps);
     desktop(&apps[index]);
     save(&apps);
     // A new URL or profile mode means a different window; do not let the
@@ -650,6 +828,7 @@ fn main() {
         usage();
         return;
     }
+    migrate_if_needed();
     let mut apps = load();
     match args[0].as_str() {
         "create" => create(&args[1..]),
@@ -663,6 +842,11 @@ fn main() {
         "edit" => edit(&args[1..]),
         "icon" => set_icon(&args[1..]),
         "doctor" => doctor(&apps),
+        "refresh" => {
+            refresh_apps(&mut apps);
+            mark_state_current();
+            println!("refreshed {} webapp(s)", apps.len());
+        }
         _ => {
             usage();
             std::process::exit(2);
