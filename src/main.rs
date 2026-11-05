@@ -188,39 +188,38 @@ fn browser_candidates() -> &'static [&'static str] {
     ]
 }
 
-fn browser_available(candidate: &str) -> bool {
-    Path::new(candidate).is_file()
-        || Command::new(candidate)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
-}
-
-fn find_browser(explicit: Option<&str>) -> String {
+/// The browser to use: `--browser`, then `NIRUWEBAPP_BROWSER`, then the
+/// first supported browser in ~/.local/bin or on PATH. Detection only looks
+/// at files; it never starts a browser.
+fn find_browser(explicit: Option<&str>) -> Result<String, String> {
     if let Some(path) = explicit {
-        if browser_available(path) {
-            return path.to_string();
+        if browser_exists(path) {
+            return Ok(path.to_string());
         }
-        die(&format!("browser not found: {path}"));
+        return Err(format!("browser not found: {path}"));
     }
     if let Ok(path) = env::var("NIRUWEBAPP_BROWSER") {
         if !path.is_empty() {
-            return find_browser(Some(&path));
+            return find_browser(Some(&path)).map_err(|e| format!("{e} (from NIRUWEBAPP_BROWSER)"));
         }
     }
     let local_bin = home().join(".local/bin");
     for candidate in browser_candidates() {
         let local = local_bin.join(candidate);
         if local.is_file() {
-            return local.to_string_lossy().to_string();
+            return Ok(local.to_string_lossy().to_string());
         }
-        if browser_available(candidate) {
-            return candidate.to_string();
+        if browser_exists(candidate) {
+            return Ok(candidate.to_string());
         }
     }
-    die("no supported browser found (Helium/Chromium). Install one or use --browser.");
+    Err(format!(
+        "no supported browser found. Searched {} and PATH for: {}.\n\
+         Install one of them, or point at a Chromium-family browser with\n\
+         --browser PATH (or NIRUWEBAPP_BROWSER=PATH).",
+        local_bin.display(),
+        browser_candidates().join(", ")
+    ))
 }
 
 /// The program desktop entries run: the stable NIRUX link when present.
@@ -662,7 +661,8 @@ fn create(args: &[String]) {
     };
     validate_name(&name).unwrap_or_else(|e| fail(&e));
     validate_url(&url).unwrap_or_else(|e| fail(&e));
-    let browser = find_browser(parse_value(args, "--browser").as_deref());
+    let browser =
+        find_browser(parse_value(args, "--browser").as_deref()).unwrap_or_else(|e| die(&e));
     let shared_profile = args.iter().any(|arg| arg == "--shared-profile");
     let mut apps = load();
     let base = slug(&name);
@@ -759,6 +759,22 @@ fn launch_command(apps: &mut Vec<App>, args: &[String]) {
         die(&format!("webapp not found: {query}"))
     };
     let new_window = args.iter().any(|arg| arg == "--new-window");
+    if !browser_exists(&apps[index].browser) {
+        // For example after a Helium update moved the binary.
+        let old = apps[index].browser.clone();
+        let found = find_browser(None).unwrap_or_else(|e| {
+            die(&format!(
+                "the browser of {} is gone: {old}\n{e}",
+                apps[index].name
+            ))
+        });
+        eprintln!(
+            "niruwebapp: {old} no longer exists; {} now uses {found}",
+            apps[index].name
+        );
+        apps[index].browser = found;
+        save(apps);
+    }
     let app = apps.remove(index);
     if !new_window {
         if activate_existing(&app) {

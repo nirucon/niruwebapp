@@ -81,6 +81,19 @@ cp "$BIN" "$T/odd dir 100%\$/niruwebapp"
 grep -qxF "Exec=\"$T/odd dir 100%%\\\\\$/niruwebapp\" launch sm-r-100-x-y" "$T/data/applications/niruwebapp-sm-r-100-x-y.desktop"
 "$BIN" remove sm-r-100-x-y --yes >/dev/null
 "$BIN" icon example-app "$T/icon.png"
+# U4: a vanished browser path falls back to detection and updates the record.
+awk -F '\t' 'BEGIN { OFS = "\t" } $1 == "example-app" { $4 = "/nonexistent/helium" } { print }' \
+  "$T/data/niruwebapp/apps.tsv" > "$T/apps.tsv" && mv "$T/apps.tsv" "$T/data/niruwebapp/apps.tsv"
+rm -f "$XDG_RUNTIME_DIR/niruwebapp/example-app.launch"
+"$BIN" launch example-app 2>"$T/err"
+grep -q '/nonexistent/helium no longer exists; Example App now uses helium' "$T/err"
+awk -F '\t' '$1 == "example-app" && $4 == "helium" { found = 1 } END { exit !found }' "$T/data/niruwebapp/apps.tsv"
+wait_for_launch 4
+# No browser at all: the error names what was searched and --browser.
+if PATH=/nonexistent "$BIN" create Nope https://example.net/ 2>"$T/err"; then echo 'created without a browser' >&2; exit 1; fi
+grep -q 'Searched .* for: helium, chromium' "$T/err"
+grep -q -- '--browser PATH' "$T/err"
+
 # U3: a dry run lists what goes and what stays; without --yes a
 # non-interactive remove refuses and changes nothing.
 head -c 3000 /dev/zero > "$T/data/niruwebapp/profiles/example-app/Cookies"
