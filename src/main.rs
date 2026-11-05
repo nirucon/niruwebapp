@@ -121,7 +121,7 @@ fn usage() {
     println!("       [--icon PATH | --fetch-icon]");
     println!("  list [--json]");
     println!("  launch ID|NAME [--new-window]");
-    println!("  remove ID|NAME [--delete-profile]");
+    println!("  remove ID|NAME [--delete-profile] [--dry-run | --yes]");
     println!("  edit ID|NAME [--name NAME] [--url URL] [--icon PATH | --fetch-icon]");
     println!("       [--shared-profile | --isolated-profile]");
     println!("  icon ID|NAME PATH");
@@ -836,6 +836,25 @@ fn remove(args: &[String]) {
     };
     let delete_profile = args.iter().any(|arg| arg == "--delete-profile");
     let profile = profiles_dir().join(&apps[index].id);
+    let plan = remove_plan(&apps[index], &profile, delete_profile);
+    if args.iter().any(|arg| arg == "--dry-run") {
+        print!("{plan}");
+        return;
+    }
+    if !args.iter().any(|arg| arg == "--yes") {
+        use std::io::IsTerminal;
+        eprint!("{plan}");
+        if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+            fail("not removing without --yes in a non-interactive run");
+        }
+        eprint!("Remove {}? [y/N] ", apps[index].name);
+        let mut answer = String::new();
+        let _ = std::io::stdin().read_line(&mut answer);
+        if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+            println!("nothing removed");
+            return;
+        }
+    }
     if delete_profile {
         if profile_in_use(&profile) {
             die(&format!(
@@ -856,6 +875,68 @@ fn remove(args: &[String]) {
     paint_letter_icons(&apps);
     save(&apps);
     println!("removed {}", app.name);
+}
+
+/// Total size of the regular files under `path` (symlinks are not followed).
+fn tree_size(path: &Path) -> u64 {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if !meta.is_dir() {
+        return if meta.is_file() { meta.len() } else { 0 };
+    }
+    fs::read_dir(path)
+        .map(|entries| entries.flatten().map(|e| tree_size(&e.path())).sum())
+        .unwrap_or(0)
+}
+
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// What `remove` will delete, and what it keeps.
+fn remove_plan(app: &App, profile: &Path, delete_profile: bool) -> String {
+    let mut plan = format!("Removing webapp {} ({}):\n", app.name, app.id);
+    plan.push_str(&format!(
+        "  delete desktop entry {}\n",
+        app.desktop_path().display()
+    ));
+    if let Some(icon) = app
+        .icon
+        .as_deref()
+        .filter(|icon| Path::new(icon).starts_with(icons_dir()))
+    {
+        plan.push_str(&format!("  delete icon {icon}\n"));
+    }
+    let size = || human_size(tree_size(profile));
+    if delete_profile && profile.exists() {
+        plan.push_str(&format!(
+            "  delete profile {} ({})\n",
+            profile.display(),
+            size()
+        ));
+    } else if profile.exists() {
+        plan.push_str(&format!(
+            "  keep profile {} ({}; --delete-profile removes it)\n",
+            profile.display(),
+            size()
+        ));
+    }
+    if app.shared_profile {
+        plan.push_str("  keep the browser's shared profile (never touched)\n");
+    }
+    plan
 }
 
 fn set_icon(args: &[String]) {
@@ -1051,6 +1132,13 @@ mod tests {
         assert!(is_microsoft_365("https://contoso.sharepoint.com/"));
         assert!(!is_microsoft_365("https://microsoft.com.evil.example/"));
         assert!(!is_microsoft_365("https://example.com/"));
+    }
+
+    #[test]
+    fn sizes_are_human_readable() {
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(1536), "1.5 KB");
+        assert_eq!(human_size(3 * 1024 * 1024 * 1024), "3.0 GB");
     }
 
     #[test]

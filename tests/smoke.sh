@@ -79,9 +79,21 @@ mkdir -p "$T/odd dir 100%\$"
 cp "$BIN" "$T/odd dir 100%\$/niruwebapp"
 "$T/odd dir 100%\$/niruwebapp" edit sm-r-100-x-y >/dev/null
 grep -qxF "Exec=\"$T/odd dir 100%%\\\\\$/niruwebapp\" launch sm-r-100-x-y" "$T/data/applications/niruwebapp-sm-r-100-x-y.desktop"
-"$BIN" remove sm-r-100-x-y >/dev/null
+"$BIN" remove sm-r-100-x-y --yes >/dev/null
 "$BIN" icon example-app "$T/icon.png"
-"$BIN" remove example-app
+# U3: a dry run lists what goes and what stays; without --yes a
+# non-interactive remove refuses and changes nothing.
+head -c 3000 /dev/zero > "$T/data/niruwebapp/profiles/example-app/Cookies"
+"$BIN" remove example-app --dry-run > "$T/plan"
+grep -q "^  delete desktop entry .*/niruwebapp-example-app.desktop$" "$T/plan"
+grep -q "^  delete icon .*/niruwebapp-example-app.png$" "$T/plan"
+grep -q "^  keep profile .*/profiles/example-app (2.9 KB; --delete-profile removes it)$" "$T/plan"
+"$BIN" remove example-app --delete-profile --dry-run | grep -q "^  delete profile .*/profiles/example-app (2.9 KB)$"
+if "$BIN" remove example-app < /dev/null 2>"$T/err"; then echo 'remove without --yes succeeded' >&2; exit 1; fi
+grep -q 'without --yes' "$T/err"
+[ -f "$T/data/applications/niruwebapp-example-app.desktop" ]
+"$BIN" remove example-app --yes
+[ -d "$T/data/niruwebapp/profiles/example-app" ]
 [ ! -e "$T/data/applications/niruwebapp-example-app.desktop" ]
 [ ! -e "$T/data/icons/hicolor/128x128/apps/niruwebapp-example-app.png" ]
 echo 'PASS: create/list/launch/edit/remove, profile modes and browser args'
