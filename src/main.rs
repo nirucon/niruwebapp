@@ -119,7 +119,7 @@ fn usage() {
     println!("Usage: niruwebapp <command> [arguments]");
     println!("  create NAME URL [--browser PATH] [--shared-profile]");
     println!("       [--icon PATH | --fetch-icon]");
-    println!("  list");
+    println!("  list [--json]");
     println!("  launch ID|NAME [--new-window]");
     println!("  remove ID|NAME [--delete-profile]");
     println!("  edit ID|NAME [--name NAME] [--url URL] [--icon PATH | --fetch-icon]");
@@ -357,6 +357,59 @@ fn doctor(apps: &[App]) {
             );
         }
     }
+}
+
+fn json_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Machine-readable list for launcher views: one object per webapp.
+/// `running` is null when there is no X display.
+fn list_json(apps: &[App]) -> String {
+    let clients = x11::Windows::connect().map(|windows| windows.clients());
+    let mut out = String::from("[");
+    for (index, app) in apps.iter().enumerate() {
+        let running = clients.as_ref().map_or("null", |list| {
+            if list.iter().any(|w| app.owns_window(w)) {
+                "true"
+            } else {
+                "false"
+            }
+        });
+        out.push_str(if index == 0 { "\n  " } else { ",\n  " });
+        out.push_str(&format!(
+            "{{\"id\": {}, \"name\": {}, \"url\": {}, \"profile\": {}, \"icon\": {}, \"icon_source\": {}, \"expected_class\": {}, \"running\": {}, \"desktop_entry\": {}}}",
+            json_string(&app.id),
+            json_string(&app.name),
+            json_string(&app.url),
+            json_string(if app.shared_profile { "shared" } else { "isolated" }),
+            app.icon.as_deref().map_or("null".to_string(), json_string),
+            json_string(match app.icon_kind {
+                IconKind::Legacy if app.icon.is_none() => "generic",
+                IconKind::Legacy | IconKind::User => "user",
+                IconKind::Letter => "letter",
+                IconKind::Fetched => "fetched",
+            }),
+            json_string(&app.expected_class()),
+            running,
+            json_string(&app.desktop_path().to_string_lossy()),
+        ));
+    }
+    out.push_str(if apps.is_empty() { "]\n" } else { "\n]\n" });
+    out
 }
 
 /// Whether a stored browser (absolute path or PATH name) still exists.
@@ -837,6 +890,7 @@ fn main() {
     let mut apps = load();
     match args[0].as_str() {
         "create" => create(&args[1..]),
+        "list" if args.iter().any(|arg| arg == "--json") => print!("{}", list_json(&apps)),
         "list" => {
             for app in apps {
                 println!("{}\t{}\t{}", app.id, app.name, app.url);
@@ -878,6 +932,14 @@ mod tests {
             b"helium\0--user-data-dir=/tmp/profile x-other\0",
             profile
         ));
+    }
+
+    #[test]
+    fn json_strings_are_escaped() {
+        assert_eq!(
+            json_string("a\"b\\c\nd\u{1}é"),
+            "\"a\\\"b\\\\c\\nd\\u0001é\""
+        );
     }
 
     #[test]

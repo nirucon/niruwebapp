@@ -3,6 +3,7 @@ set -eu
 BIN=${1:?usage: smoke.sh BIN}
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 export HOME=$T/home XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config XDG_RUNTIME_DIR=$T/run PATH=$T/bin:$PATH
+unset DISPLAY
 mkdir -p "$HOME" "$T/bin"
 cat > "$T/bin/helium" <<'BROWSER'
 #!/bin/sh
@@ -27,6 +28,10 @@ printf '\211PNG\r\n\032\n' > "$T/icon.png"
 [ -f "$T/data/icons/hicolor/128x128/apps/niruwebapp-example-app.png" ]
 grep -q '^Icon=.*niruwebapp-example-app.png$' "$T/data/applications/niruwebapp-example-app.desktop"
 "$BIN" list | grep -q '^example-app.*Example App.*https://example.com$'
+"$BIN" list --json > "$T/list.json"
+grep -q '"id": "example-app", "name": "Example App", "url": "https://example.com", "profile": "isolated"' "$T/list.json"
+grep -q '"expected_class": "niruwebapp-example-app", "running": null' "$T/list.json"
+if command -v python3 >/dev/null 2>&1; then python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))[0]["icon_source"] == "user"' "$T/list.json"; fi
 "$BIN" launch example-app
 wait_for_launch 1
 grep -q -- '--app=https://example.com' "$HOME/browser-args"

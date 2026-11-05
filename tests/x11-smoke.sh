@@ -70,4 +70,7 @@ i=0; while [ "$(launches)" -lt 2 ] && [ $i -lt 100 ]; do i=$((i + 1)); sleep 0.0
 # isolated dummy no longer counts.
 grep -q "^iso	isolated	niruwebapp-iso	0	ok	ok$" "$T/doctor"
 grep -q "^mail	shared	example.com__mail	1	ok	ok$" "$T/doctor"
+"$BIN" list --json > "$T/list.json"
+grep -q '"id": "mail".*"expected_class": "example.com__mail", "running": true' "$T/list.json"
+grep -q '"id": "iso".*"running": false' "$T/list.json"
 echo 'PASS: single-window launch, activation, --new-window and doctor under Xvfb'
