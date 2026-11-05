@@ -61,6 +61,16 @@ if "$BIN" edit example-app --shared-profile --isolated-profile 2>/dev/null; then
   exit 1
 fi
 
+# U2: the name comes from the host; Microsoft 365 gets a profile hint.
+"$BIN" create https://teams.cloud.microsoft/ > "$T/out"
+grep -q '^created Teams (teams)$' "$T/out"
+grep -q '^hint: Microsoft 365 .*--shared-profile' "$T/out"
+awk -F '\t' '$1 == "teams" && $5 == "profile" { found = 1 } END { exit !found }' "$T/data/niruwebapp/apps.tsv"
+"$BIN" create https://outlook.cloud.microsoft/mail/ --shared-profile > "$T/out"
+if grep -q '^hint' "$T/out"; then echo 'unexpected hint' >&2; exit 1; fi
+"$BIN" remove teams --yes >/dev/null
+"$BIN" remove outlook --yes >/dev/null
+
 # B4: Desktop Entry escaping of names and of an Exec path with reserved
 # characters (space, %, $).
 "$BIN" create 'Smör 100% "$x" \ `y`' https://example.org/ >/dev/null

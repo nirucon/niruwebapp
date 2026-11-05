@@ -58,7 +58,7 @@ sleep 0.2; [ "$(launches)" -eq 1 ]
 wait_log "$T/other.log" ready
 "$BIN" launch mail
 [ "$(grep -c activated "$T/mail.log")" -eq 2 ]
-! grep -q activated "$T/other.log"
+if grep -q activated "$T/other.log"; then echo 'activated the wrong window' >&2; exit 1; fi
 
 # --new-window always spawns.
 "$BIN" launch mail --new-window

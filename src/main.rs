@@ -117,7 +117,7 @@ fn die(message: &str) -> ! {
 
 fn usage() {
     println!("Usage: niruwebapp <command> [arguments]");
-    println!("  create NAME URL [--browser PATH] [--shared-profile]");
+    println!("  create [NAME] URL [--browser PATH] [--shared-profile]");
     println!("       [--icon PATH | --fetch-icon]");
     println!("  list [--json]");
     println!("  launch ID|NAME [--new-window]");
@@ -593,15 +593,73 @@ fn mark_state_current() {
     let _ = fs::write(state_dir().join("format"), format!("{STATE_FORMAT}\n"));
 }
 
+/// Arguments that are not options or option values.
+fn positionals(args: &[String]) -> Vec<String> {
+    const WITH_VALUE: [&str; 4] = ["--browser", "--icon", "--name", "--url"];
+    let mut out = Vec::new();
+    let mut skip = false;
+    for arg in args {
+        if skip {
+            skip = false;
+        } else if WITH_VALUE.contains(&arg.as_str()) {
+            skip = true;
+        } else if !arg.starts_with("--") {
+            out.push(arg.clone());
+        }
+    }
+    out
+}
+
+/// A display name from the host: `teams.cloud.microsoft` → "Teams",
+/// `www.example.com` → "Example".
+fn name_from_url(url: &str) -> Option<String> {
+    let host = class::display_host(url)?;
+    if host.starts_with('[') || host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return Some(host);
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    // Skip a generic first label (www, app, ...) while a site name remains.
+    let generic = ["www", "m", "app", "web", "my"];
+    let label = labels
+        .iter()
+        .enumerate()
+        .find(|(index, label)| !(generic.contains(label) && labels.len() - index > 2))
+        .map(|(_, label)| *label)?;
+    let mut chars = label.chars();
+    let first = chars.next()?;
+    Some(first.to_uppercase().chain(chars).collect())
+}
+
+/// Microsoft 365 sign-in follows the browser session (see README).
+fn is_microsoft_365(url: &str) -> bool {
+    const SUFFIXES: [&str; 9] = [
+        "cloud.microsoft",
+        "office.com",
+        "office365.com",
+        "microsoft365.com",
+        "microsoftonline.com",
+        "sharepoint.com",
+        "onedrive.com",
+        "live.com",
+        "teams.microsoft.com",
+    ];
+    class::display_host(url).is_some_and(|host| {
+        SUFFIXES
+            .iter()
+            .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+    })
+}
+
 fn create(args: &[String]) {
-    let name = args
-        .first()
-        .cloned()
-        .unwrap_or_else(|| fail("create needs NAME URL"));
-    let url = args
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| fail("create needs NAME URL"));
+    let (name, url) = match positionals(args).as_slice() {
+        [url] if validate_url(url).is_ok() => {
+            let name = name_from_url(url)
+                .unwrap_or_else(|| fail("cannot derive a name from the URL; give NAME URL"));
+            (name, url.clone())
+        }
+        [name, url] => (name.clone(), url.clone()),
+        _ => fail("create needs [NAME] URL"),
+    };
     validate_name(&name).unwrap_or_else(|e| fail(&e));
     validate_url(&url).unwrap_or_else(|e| fail(&e));
     let browser = find_browser(parse_value(args, "--browser").as_deref());
@@ -645,6 +703,12 @@ fn create(args: &[String]) {
     save(&apps);
     mark_state_current();
     println!("created {} ({})", app.name, app.id);
+    if !app.shared_profile && is_microsoft_365(&app.url) {
+        println!(
+            "hint: Microsoft 365 sign-in usually needs the browser session: `niruwebapp edit {} --shared-profile`, and allow third-party cookies for [*.]cloud.microsoft, [*.]microsoftonline.com and the other sites in the README.",
+            app.id
+        );
+    }
 }
 
 /// A second launch within this window, with no window mapped yet, is taken
@@ -940,6 +1004,53 @@ mod tests {
             json_string("a\"b\\c\nd\u{1}é"),
             "\"a\\\"b\\\\c\\nd\\u0001é\""
         );
+    }
+
+    #[test]
+    fn names_are_derived_from_the_host() {
+        let cases = [
+            ("https://teams.cloud.microsoft/", "Teams"),
+            ("https://outlook.cloud.microsoft/mail/", "Outlook"),
+            ("https://www.example.com/x", "Example"),
+            ("https://chatgpt.com/", "Chatgpt"),
+            ("https://claude.ai", "Claude"),
+            ("https://app.slack.com/client", "Slack"),
+            ("https://music.youtube.com", "Music"),
+            ("https://www.com", "Www"),
+            ("https://öbb.at/", "Öbb"),
+            ("http://192.168.1.10:8080/", "192.168.1.10"),
+            ("https://localhost:3000/", "Localhost"),
+        ];
+        for (url, want) in cases {
+            assert_eq!(name_from_url(url).as_deref(), Some(want), "{url}");
+        }
+    }
+
+    #[test]
+    fn create_takes_an_optional_name() {
+        let args = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            positionals(&args(&[
+                "https://x.org",
+                "--browser",
+                "/b",
+                "--shared-profile"
+            ])),
+            args(&["https://x.org"])
+        );
+        assert_eq!(
+            positionals(&args(&["X", "--icon", "/i.png", "https://x.org"])),
+            args(&["X", "https://x.org"])
+        );
+    }
+
+    #[test]
+    fn microsoft_365_hosts_are_recognized() {
+        assert!(is_microsoft_365("https://teams.cloud.microsoft/"));
+        assert!(is_microsoft_365("https://outlook.office.com/mail"));
+        assert!(is_microsoft_365("https://contoso.sharepoint.com/"));
+        assert!(!is_microsoft_365("https://microsoft.com.evil.example/"));
+        assert!(!is_microsoft_365("https://example.com/"));
     }
 
     #[test]
