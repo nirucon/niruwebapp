@@ -3,7 +3,9 @@
 //! One short-lived connection per command: no event loop and no polling.
 
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConnectionExt, EventMask, Window};
+use x11rb::protocol::xproto::{
+    AtomEnum, ClientMessageEvent, ConnectionExt, EventMask, MapState, Window,
+};
 use x11rb::rust_connection::RustConnection;
 
 pub struct Windows {
@@ -55,12 +57,27 @@ impl Windows {
                 }
             }
         }
-        self.conn
+        // No window manager: mapped top-level windows only (browsers keep
+        // unmapped leader windows with the same class).
+        let children = self
+            .conn
             .query_tree(self.root)
             .ok()
             .and_then(|cookie| cookie.reply().ok())
             .map(|tree| tree.children)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let cookies: Vec<_> = children
+            .iter()
+            .map(|&id| self.conn.get_window_attributes(id).ok())
+            .collect();
+        children
+            .into_iter()
+            .zip(cookies)
+            .filter_map(|(id, cookie)| {
+                let attrs = cookie?.reply().ok()?;
+                (attrs.map_state == MapState::VIEWABLE).then_some(id)
+            })
+            .collect()
     }
 
     pub fn clients(&self) -> Vec<ClientWindow> {
