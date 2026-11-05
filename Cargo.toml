@@ -10,3 +10,7 @@ description = "Small webapp manager for the NIRU desktop"
 lto = true
 codegen-units = 1
 strip = true
+
+[dependencies]
+x11rb = { version = "0.13", default-features = false }
+ab_glyph = { version = "0.2", default-features = false, features = ["std"] }

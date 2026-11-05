@@ -1,3 +1,6 @@
+mod class;
+mod x11;
+
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -12,6 +15,27 @@ struct App {
     browser: String,
     shared_profile: bool,
     icon: Option<String>,
+}
+
+impl App {
+    /// The WM_CLASS value this webapp's windows carry (see `class`).
+    fn expected_class(&self) -> String {
+        class::expected_class(&self.id, &self.url, self.shared_profile)
+    }
+
+    fn owns_window(&self, window: &x11::ClientWindow) -> bool {
+        class::window_matches(
+            &self.id,
+            &self.url,
+            self.shared_profile,
+            &window.instance,
+            &window.class,
+        )
+    }
+
+    fn desktop_path(&self) -> PathBuf {
+        desktop_dir().join(format!("niruwebapp-{}.desktop", self.id))
+    }
 }
 
 fn home() -> PathBuf {
@@ -63,6 +87,7 @@ fn usage() {
     println!("  edit ID|NAME [--name NAME] [--url URL] [--icon PATH]");
     println!("       [--shared-profile | --isolated-profile]");
     println!("  icon ID|NAME PATH");
+    println!("  doctor");
 }
 
 fn slug(name: &str) -> String {
@@ -225,13 +250,78 @@ fn save(apps: &[App]) {
 fn desktop(app: &App) {
     let _ = fs::create_dir_all(desktop_dir());
     let _ = fs::create_dir_all(apps_dir());
-    let path = desktop_dir().join(format!("niruwebapp-{}.desktop", app.id));
+    let path = app.desktop_path();
     let icon = app.icon.as_deref().unwrap_or("web-browser");
     let entry = format!(
-        "[Desktop Entry]\nType=Application\nName={}\nComment=Webapp\nExec={} launch {}\nIcon={}\nTerminal=false\nCategories=Network;WebBrowser;\nStartupWMClass=niruwebapp-{}\n",
-        app.name.replace(['\n', '\r'], " "), desktop_exec(), app.id, icon, app.id
+        "[Desktop Entry]\nType=Application\nName={}\nComment=Webapp\nExec={} launch {}\nIcon={}\nTerminal=false\nCategories=Network;WebBrowser;\nStartupWMClass={}\n",
+        app.name.replace(['\n', '\r'], " "),
+        desktop_exec(),
+        app.id,
+        icon,
+        app.expected_class()
     );
     fs::write(&path, entry).unwrap_or_else(|e| die(&format!("write {}: {e}", path.display())));
+}
+
+/// Read-only report: every webapp, its expected class, and whether a window
+/// with that class is open now.
+fn doctor(apps: &[App]) {
+    let windows = x11::Windows::connect();
+    let clients = windows.as_ref().map(x11::Windows::clients);
+    if clients.is_none() {
+        println!("note: no X display; window state unknown");
+    }
+    println!("ID\tPROFILE\tEXPECTED CLASS\tWINDOWS\tENTRY\tBROWSER");
+    for app in apps {
+        let open = clients
+            .as_ref()
+            .map(|list| list.iter().filter(|w| app.owns_window(w)).count());
+        let entry = match fs::read_to_string(app.desktop_path()) {
+            Ok(text) if text.contains(&format!("\nStartupWMClass={}\n", app.expected_class())) => {
+                "ok"
+            }
+            Ok(_) => "stale",
+            Err(_) => "missing",
+        };
+        let browser = if browser_exists(&app.browser) {
+            "ok"
+        } else {
+            "missing"
+        };
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            app.id,
+            if app.shared_profile {
+                "shared"
+            } else {
+                "isolated"
+            },
+            app.expected_class(),
+            open.map_or_else(|| "?".to_string(), |n| n.to_string()),
+            entry,
+            browser
+        );
+    }
+    for window in clients.iter().flatten() {
+        if window.class.starts_with("niruwebapp-")
+            && !apps.iter().any(|app| app.owns_window(window))
+        {
+            println!(
+                "note: window 0x{:x} ({} {}) matches no webapp",
+                window.id, window.instance, window.class
+            );
+        }
+    }
+}
+
+/// Whether a stored browser (absolute path or PATH name) still exists.
+fn browser_exists(browser: &str) -> bool {
+    if browser.contains('/') {
+        return Path::new(browser).is_file();
+    }
+    env::var_os("PATH")
+        .map(|paths| env::split_paths(&paths).any(|dir| dir.join(browser).is_file()))
+        .unwrap_or(false)
 }
 
 fn find(apps: &[App], query: &str) -> Option<usize> {
@@ -332,7 +422,7 @@ fn launch(app: &App) {
     let _ = fs::create_dir_all(&profile);
     let mut command = Command::new(&app.browser);
     command.args([
-        format!("--app={}", app.url),
+        format!("--app={}", class::ascii_url(&app.url)),
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
         format!("--class=niruwebapp-{}", app.id),
@@ -402,7 +492,7 @@ fn remove(args: &[String]) {
     }
     let app = apps.remove(index);
     remove_icon(&app);
-    let _ = fs::remove_file(desktop_dir().join(format!("niruwebapp-{}.desktop", app.id)));
+    let _ = fs::remove_file(app.desktop_path());
     let _ = fs::remove_file(apps_dir().join(format!("{}.toml", app.id)));
     save(&apps);
     println!("removed {}", app.name);
@@ -513,6 +603,7 @@ fn main() {
         "remove" => remove(&args[1..]),
         "edit" => edit(&args[1..]),
         "icon" => set_icon(&args[1..]),
+        "doctor" => doctor(&apps),
         _ => {
             usage();
             std::process::exit(2);
