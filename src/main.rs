@@ -82,7 +82,7 @@ fn usage() {
     println!("Usage: niruwebapp <command> [arguments]");
     println!("  create NAME URL [--browser PATH] [--shared-profile] [--icon PATH]");
     println!("  list");
-    println!("  launch ID|NAME");
+    println!("  launch ID|NAME [--new-window]");
     println!("  remove ID|NAME [--delete-profile]");
     println!("  edit ID|NAME [--name NAME] [--url URL] [--icon PATH]");
     println!("       [--shared-profile | --isolated-profile]");
@@ -417,6 +417,71 @@ fn create(args: &[String]) {
     println!("created {} ({})", app.name, app.id);
 }
 
+/// A second launch within this window, with no window mapped yet, is taken
+/// as a double click while the browser starts.
+const LAUNCH_GUARD: std::time::Duration = std::time::Duration::from_secs(3);
+
+fn launch_guard_path(app: &App) -> PathBuf {
+    let base = env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(state_dir);
+    base.join("niruwebapp").join(format!("{}.launch", app.id))
+}
+
+fn recently_launched(app: &App) -> bool {
+    fs::metadata(launch_guard_path(app))
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.elapsed().ok())
+        .is_some_and(|age| age < LAUNCH_GUARD)
+}
+
+fn mark_launched(app: &App) {
+    let path = launch_guard_path(app);
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let _ = fs::write(path, b"");
+}
+
+/// Activate an open window of this webapp. Returns false when none is open
+/// or there is no X display.
+fn activate_existing(app: &App) -> bool {
+    let Some(windows) = x11::Windows::connect() else {
+        return false;
+    };
+    let Some(window) = windows.clients().into_iter().find(|w| app.owns_window(w)) else {
+        return false;
+    };
+    windows.activate(window.id)
+}
+
+fn launch_command(apps: &mut Vec<App>, args: &[String]) {
+    let query = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| fail("launch needs ID or NAME"));
+    let Some(index) = find(apps, &query) else {
+        die(&format!("webapp not found: {query}"))
+    };
+    let new_window = args.iter().any(|arg| arg == "--new-window");
+    let app = apps.remove(index);
+    if !new_window {
+        if activate_existing(&app) {
+            return;
+        }
+        if recently_launched(&app) {
+            eprintln!(
+                "niruwebapp: {} is already starting; use --new-window for another window",
+                app.name
+            );
+            return;
+        }
+    }
+    mark_launched(&app);
+    launch(&app);
+}
+
 fn launch(app: &App) {
     let profile = profiles_dir().join(&app.id);
     let _ = fs::create_dir_all(&profile);
@@ -563,6 +628,9 @@ fn edit(args: &[String]) {
     }
     desktop(&apps[index]);
     save(&apps);
+    // A new URL or profile mode means a different window; do not let the
+    // double-launch guard swallow the next launch.
+    let _ = fs::remove_file(launch_guard_path(&apps[index]));
     println!("updated {}", apps[index].name);
     if profile_changed {
         eprintln!(
@@ -590,16 +658,7 @@ fn main() {
                 println!("{}\t{}\t{}", app.id, app.name, app.url);
             }
         }
-        "launch" => {
-            let query = args
-                .get(1)
-                .cloned()
-                .unwrap_or_else(|| fail("launch needs ID or NAME"));
-            let Some(index) = find(&apps, &query) else {
-                die(&format!("webapp not found: {query}"))
-            };
-            launch(&apps.remove(index));
-        }
+        "launch" => launch_command(&mut apps, &args[1..]),
         "remove" => remove(&args[1..]),
         "edit" => edit(&args[1..]),
         "icon" => set_icon(&args[1..]),

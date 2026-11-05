@@ -1,9 +1,9 @@
-//! Read-only window lookup.
+//! Read-only window lookup and EWMH activation.
 //!
 //! One short-lived connection per command: no event loop and no polling.
 
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, Window};
+use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConnectionExt, EventMask, Window};
 use x11rb::rust_connection::RustConnection;
 
 pub struct Windows {
@@ -89,6 +89,32 @@ impl Windows {
             });
         }
         out
+    }
+
+    /// Ask the window manager to activate a window (EWMH `_NET_ACTIVE_WINDOW`,
+    /// source indication 2 = pager/launcher request).
+    pub fn activate(&self, window: Window) -> bool {
+        let Some(atom) = self.atom("_NET_ACTIVE_WINDOW") else {
+            return false;
+        };
+        let event = ClientMessageEvent::new(32, window, atom, [2u32, 0, 0, 0, 0]);
+        let sent = self
+            .conn
+            .send_event(
+                false,
+                self.root,
+                EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+                event,
+            )
+            .is_ok();
+        // Round trip so the server has processed the request before this
+        // short-lived process disconnects (it may drop unread requests).
+        sent && self
+            .conn
+            .get_input_focus()
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .is_some()
     }
 }
 

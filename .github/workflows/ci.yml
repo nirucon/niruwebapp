@@ -11,5 +11,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
-      - run: cargo build --release --locked
+      - run: cargo build --release --locked --bins --examples
       - run: sh tests/smoke.sh target/release/niruwebapp
+      - run: sudo apt-get update && sudo apt-get install -y xvfb
+      - run: sh tests/x11-smoke.sh target/release/niruwebapp target/release/examples/x11-dummy | tee x11.log && grep -q PASS x11.log
