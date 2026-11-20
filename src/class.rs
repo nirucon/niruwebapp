@@ -267,31 +267,45 @@ pub fn isolated_class(id: &str) -> String {
     format!("niruwebapp-{id}")
 }
 
-/// What a desktop entry should declare as StartupWMClass.
-pub fn expected_class(id: &str, url: &str, shared_profile: bool) -> String {
-    if shared_profile {
-        app_instance(url).unwrap_or_else(|| isolated_class(id))
-    } else {
-        isolated_class(id)
+/// The WM_CLASS class of every window in a profile group. All apps of the
+/// group pass the same `--class`, so whichever starts the browser process,
+/// the class is this one. `@` cannot occur in an app id.
+pub fn group_class(group: &str) -> String {
+    format!("niruwebapp@{group}")
+}
+
+/// How a webapp's browser profile is chosen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode<'a> {
+    Isolated,
+    Shared,
+    Group(&'a str),
+}
+
+/// What a desktop entry should declare as StartupWMClass. Shared and group
+/// windows share their class with other windows, so the per-URL instance
+/// name is the identity.
+pub fn expected_class(id: &str, url: &str, mode: Mode) -> String {
+    match mode {
+        Mode::Isolated => isolated_class(id),
+        Mode::Shared | Mode::Group(_) => app_instance(url).unwrap_or_else(|| isolated_class(id)),
     }
 }
 
 /// Whether a window's WM_CLASS (instance, class) belongs to this webapp.
-pub fn window_matches(
-    id: &str,
-    url: &str,
-    shared_profile: bool,
-    instance: &str,
-    class: &str,
-) -> bool {
+pub fn window_matches(id: &str, url: &str, mode: Mode, instance: &str, class: &str) -> bool {
     let wanted_instance = app_instance(url);
-    if shared_profile {
-        wanted_instance.as_deref() == Some(instance)
-    } else {
-        class == isolated_class(id)
-            && wanted_instance
-                .as_deref()
-                .is_none_or(|want| want == instance)
+    match mode {
+        Mode::Shared => wanted_instance.as_deref() == Some(instance),
+        Mode::Group(group) => {
+            class == group_class(group) && wanted_instance.as_deref() == Some(instance)
+        }
+        Mode::Isolated => {
+            class == isolated_class(id)
+                && wanted_instance
+                    .as_deref()
+                    .is_none_or(|want| want == instance)
+        }
     }
 }
 
@@ -342,11 +356,11 @@ mod tests {
     #[test]
     fn expected_class_depends_on_profile_mode() {
         assert_eq!(
-            expected_class("teams", "https://teams.cloud.microsoft/", true),
+            expected_class("teams", "https://teams.cloud.microsoft/", Mode::Shared),
             "teams.cloud.microsoft"
         );
         assert_eq!(
-            expected_class("claude", "https://claude.ai", false),
+            expected_class("claude", "https://claude.ai", Mode::Isolated),
             "niruwebapp-claude"
         );
     }
@@ -357,45 +371,71 @@ mod tests {
         assert!(window_matches(
             "teams",
             url,
-            true,
+            Mode::Shared,
             "teams.cloud.microsoft",
             "Helium"
         ));
         assert!(window_matches(
             "teams",
             url,
-            true,
+            Mode::Shared,
             "teams.cloud.microsoft",
             "niruwebapp-teams"
         ));
         assert!(!window_matches(
             "teams",
             url,
-            true,
+            Mode::Shared,
             "outlook.cloud.microsoft__mail",
             "Helium"
         ));
         assert!(window_matches(
             "claude",
             "https://claude.ai",
-            false,
+            Mode::Isolated,
             "claude.ai",
             "niruwebapp-claude"
         ));
         assert!(!window_matches(
             "claude",
             "https://claude.ai",
-            false,
+            Mode::Isolated,
             "claude.ai",
             "Helium"
         ));
         assert!(!window_matches(
             "claude",
             "https://claude.ai",
-            false,
+            Mode::Isolated,
             "Navigator",
             "niruwebapp-claude"
         ));
+        let gmail = "https://mail.google.com/";
+        assert!(window_matches(
+            "gmail",
+            gmail,
+            Mode::Group("google"),
+            "mail.google.com",
+            "niruwebapp@google"
+        ));
+        assert!(!window_matches(
+            "gmail",
+            gmail,
+            Mode::Group("google"),
+            "mail.google.com",
+            "Helium"
+        ));
+        assert!(!window_matches(
+            "gmail",
+            gmail,
+            Mode::Group("google"),
+            "calendar.google.com",
+            "niruwebapp@google"
+        ));
+        assert_eq!(
+            expected_class("gmail", gmail, Mode::Group("google")),
+            "mail.google.com"
+        );
     }
 
     #[test]

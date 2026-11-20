@@ -1,3 +1,4 @@
+mod catalog;
 mod class;
 mod desktop;
 mod icon;
@@ -15,9 +16,66 @@ struct App {
     name: String,
     url: String,
     browser: String,
-    shared_profile: bool,
+    profile: Profile,
     icon: Option<String>,
     icon_kind: IconKind,
+}
+
+/// Which browser profile a webapp uses: its own (the default), the
+/// browser's ordinary one, or one shared by a named group of webapps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Profile {
+    Isolated,
+    Shared,
+    Group(String),
+}
+
+impl Profile {
+    /// The state column: `profile`, `shared` or `group:NAME`. Releases
+    /// before 0.3 read an unknown value as isolated.
+    fn as_state(&self) -> String {
+        match self {
+            Profile::Isolated => "profile".into(),
+            Profile::Shared => "shared".into(),
+            Profile::Group(group) => format!("group:{group}"),
+        }
+    }
+    fn from_state(text: &str) -> Self {
+        match text {
+            "shared" => Profile::Shared,
+            _ => match text.strip_prefix("group:") {
+                Some(group) if validate_group(group).is_ok() => Profile::Group(group.into()),
+                _ => Profile::Isolated,
+            },
+        }
+    }
+    fn label(&self) -> String {
+        match self {
+            Profile::Isolated => "isolated".into(),
+            Profile::Shared => "shared".into(),
+            Profile::Group(group) => format!("group:{group}"),
+        }
+    }
+    fn mode(&self) -> class::Mode<'_> {
+        match self {
+            Profile::Isolated => class::Mode::Isolated,
+            Profile::Shared => class::Mode::Shared,
+            Profile::Group(group) => class::Mode::Group(group),
+        }
+    }
+}
+
+/// A profile group name: what `--profile-group` accepts.
+fn validate_group(group: &str) -> Result<(), String> {
+    if group.is_empty()
+        || group.len() > 32
+        || !group
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    {
+        return Err("a profile group is 1 to 32 characters of a-z, 0-9 and -".into());
+    }
+    Ok(())
 }
 
 /// Where an app's icon came from. Stored as the seventh state column; older
@@ -52,14 +110,14 @@ impl IconKind {
 impl App {
     /// The WM_CLASS value this webapp's windows carry (see `class`).
     fn expected_class(&self) -> String {
-        class::expected_class(&self.id, &self.url, self.shared_profile)
+        class::expected_class(&self.id, &self.url, self.profile.mode())
     }
 
     fn owns_window(&self, window: &x11::ClientWindow) -> bool {
         class::window_matches(
             &self.id,
             &self.url,
-            self.shared_profile,
+            self.profile.mode(),
             &window.instance,
             &window.class,
         )
@@ -67,6 +125,15 @@ impl App {
 
     fn desktop_path(&self) -> PathBuf {
         desktop_dir().join(format!("niruwebapp-{}.desktop", self.id))
+    }
+
+    /// The browser profile directory, or None for the shared profile.
+    fn profile_dir(&self) -> Option<PathBuf> {
+        match &self.profile {
+            Profile::Isolated => Some(profiles_dir().join(&self.id)),
+            Profile::Shared => None,
+            Profile::Group(group) => Some(group_profile_dir(group)),
+        }
     }
 }
 
@@ -90,6 +157,10 @@ fn apps_dir() -> PathBuf {
 }
 fn profiles_dir() -> PathBuf {
     state_dir().join("profiles")
+}
+/// A group profile; `@` keeps it apart from every app id.
+fn group_profile_dir(group: &str) -> PathBuf {
+    profiles_dir().join(format!("@{group}"))
 }
 fn desktop_dir() -> PathBuf {
     data_home().join("applications")
@@ -117,13 +188,15 @@ fn die(message: &str) -> ! {
 
 fn usage() {
     println!("Usage: niruwebapp <command> [arguments]");
-    println!("  create [NAME] URL [--browser PATH] [--shared-profile]");
-    println!("       [--icon PATH | --fetch-icon]");
+    println!("  create [NAME] URL [--browser PATH] [--icon PATH | --fetch-icon]");
+    println!("       [--shared-profile | --profile-group NAME]");
+    println!("  catalog [SET...] [--tsv | --json]   built-in web apps by set");
+    println!("  add SET|KEY... [--url URL] [--dry-run] [--fetch-icon] [--browser PATH]");
     println!("  list [--json]");
     println!("  launch ID|NAME [--new-window]");
     println!("  remove ID|NAME [--delete-profile] [--dry-run | --yes]");
     println!("  edit ID|NAME [--name NAME] [--url URL] [--icon PATH | --fetch-icon]");
-    println!("       [--shared-profile | --isolated-profile]");
+    println!("       [--shared-profile | --isolated-profile | --profile-group NAME]");
     println!("  icon ID|NAME PATH");
     println!("  refresh            regenerate letter icons and desktop entries");
     println!("  doctor");
@@ -248,7 +321,7 @@ fn load() -> Vec<App> {
             name: fields[1].into(),
             url: fields[2].into(),
             browser: fields[3].into(),
-            shared_profile: fields[4] == "shared",
+            profile: Profile::from_state(fields[4]),
             icon: fields.get(5).filter(|s| !s.is_empty()).map(|s| (*s).into()),
             icon_kind: IconKind::parse(fields.get(6).copied().unwrap_or("")),
         });
@@ -268,11 +341,7 @@ fn save(apps: &[App]) {
                 app.name,
                 app.url,
                 app.browser,
-                if app.shared_profile {
-                    "shared"
-                } else {
-                    "profile"
-                },
+                app.profile.as_state(),
                 app.icon.as_deref().unwrap_or(""),
                 app.icon_kind.as_str()
             )
@@ -335,11 +404,7 @@ fn doctor(apps: &[App]) {
         println!(
             "{}\t{}\t{}\t{}\t{}\t{}",
             app.id,
-            if app.shared_profile {
-                "shared"
-            } else {
-                "isolated"
-            },
+            app.profile.label(),
             app.expected_class(),
             open.map_or_else(|| "?".to_string(), |n| n.to_string()),
             entry,
@@ -347,7 +412,7 @@ fn doctor(apps: &[App]) {
         );
     }
     for window in clients.iter().flatten() {
-        if window.class.starts_with("niruwebapp-")
+        if (window.class.starts_with("niruwebapp-") || window.class.starts_with("niruwebapp@"))
             && !apps.iter().any(|app| app.owns_window(window))
         {
             println!(
@@ -390,11 +455,20 @@ fn list_json(apps: &[App]) -> String {
         });
         out.push_str(if index == 0 { "\n  " } else { ",\n  " });
         out.push_str(&format!(
-            "{{\"id\": {}, \"name\": {}, \"url\": {}, \"profile\": {}, \"icon\": {}, \"icon_source\": {}, \"expected_class\": {}, \"running\": {}, \"desktop_entry\": {}}}",
+            "{{\"id\": {}, \"name\": {}, \"url\": {}, \"profile\": {}, \"profile_group\": {}, \"catalog\": {}, \"icon\": {}, \"icon_source\": {}, \"expected_class\": {}, \"running\": {}, \"desktop_entry\": {}}}",
             json_string(&app.id),
             json_string(&app.name),
             json_string(&app.url),
-            json_string(if app.shared_profile { "shared" } else { "isolated" }),
+            json_string(match app.profile {
+                Profile::Isolated => "isolated",
+                Profile::Shared => "shared",
+                Profile::Group(_) => "group",
+            }),
+            match &app.profile {
+                Profile::Group(group) => json_string(group),
+                _ => "null".into(),
+            },
+            catalog_key(&app.url).map_or("null".to_string(), json_string),
             app.icon.as_deref().map_or("null".to_string(), json_string),
             json_string(match app.icon_kind {
                 IconKind::Legacy if app.icon.is_none() => "generic",
@@ -433,14 +507,28 @@ fn parse_value(args: &[String], name: &str) -> Option<String> {
         .cloned()
 }
 
-fn profile_mode_from_args(args: &[String]) -> Result<Option<bool>, &'static str> {
-    let shared = args.iter().any(|arg| arg == "--shared-profile");
-    let isolated = args.iter().any(|arg| arg == "--isolated-profile");
-    match (shared, isolated) {
-        (true, true) => Err("choose either --shared-profile or --isolated-profile"),
-        (true, false) => Ok(Some(true)),
-        (false, true) => Ok(Some(false)),
-        (false, false) => Ok(None),
+/// The profile flags: `--shared-profile`, `--isolated-profile` or
+/// `--profile-group NAME`, at most one of them.
+fn profile_mode_from_args(args: &[String]) -> Result<Option<Profile>, String> {
+    let mut chosen = Vec::new();
+    if args.iter().any(|arg| arg == "--shared-profile") {
+        chosen.push(Profile::Shared);
+    }
+    if args.iter().any(|arg| arg == "--isolated-profile") {
+        chosen.push(Profile::Isolated);
+    }
+    if args.iter().any(|arg| arg == "--profile-group") {
+        let group = parse_value(args, "--profile-group")
+            .ok_or_else(|| "--profile-group needs a NAME".to_string())?;
+        validate_group(&group)?;
+        chosen.push(Profile::Group(group));
+    }
+    match chosen.len() {
+        0 => Ok(None),
+        1 => Ok(chosen.pop()),
+        _ => Err(
+            "choose one of --shared-profile, --isolated-profile and --profile-group NAME".into(),
+        ),
     }
 }
 
@@ -536,14 +624,22 @@ fn fetch_icon(app: &mut App) {
     }
 }
 
-/// Give pre-0.2 rows without an icon a letter icon, redraw the letter icons
-/// and rewrite every desktop entry.
+/// Give pre-0.2 rows without an icon a letter icon, move webapps that still
+/// use a catalogue service's former address to its current one, redraw the
+/// letter icons and rewrite every desktop entry.
 fn refresh_apps(apps: &mut [App]) {
     for app in apps.iter_mut() {
         match app.icon_kind {
             IconKind::Legacy if app.icon.is_none() => use_letter_icon(app),
             IconKind::Legacy => app.icon_kind = IconKind::User,
             _ => {}
+        }
+        if let Some(current) = catalog::moved_to(&app.url).filter(|url| *url != app.url) {
+            eprintln!(
+                "niruwebapp: {} moved from {} to {current}",
+                app.name, app.url
+            );
+            app.url = current.to_string();
         }
     }
     paint_letter_icons(apps);
@@ -594,7 +690,7 @@ fn mark_state_current() {
 
 /// Arguments that are not options or option values.
 fn positionals(args: &[String]) -> Vec<String> {
-    const WITH_VALUE: [&str; 4] = ["--browser", "--icon", "--name", "--url"];
+    const WITH_VALUE: [&str; 5] = ["--browser", "--icon", "--name", "--url", "--profile-group"];
     let mut out = Vec::new();
     let mut skip = false;
     for arg in args {
@@ -649,6 +745,57 @@ fn is_microsoft_365(url: &str) -> bool {
     })
 }
 
+/// What `create` and `add` need to make one webapp.
+struct NewApp<'a> {
+    name: String,
+    url: String,
+    browser: String,
+    profile: Profile,
+    icon: Option<&'a str>,
+    fetch_icon: bool,
+}
+
+/// Add one webapp to `apps` and write its desktop entry. The caller paints
+/// the letter icons and saves.
+fn create_app(apps: &mut Vec<App>, new: NewApp) -> App {
+    let base = slug(&new.name);
+    let mut id = base.clone();
+    let mut n = 2;
+    while apps.iter().any(|app| app.id == id) {
+        id = format!("{base}-{n}");
+        n += 1;
+    }
+    let user_icon = new
+        .icon
+        .map(|source| install_icon(Path::new(source), &id, None));
+    let mut app = App {
+        id,
+        name: new.name,
+        url: new.url,
+        browser: new.browser,
+        profile: new.profile,
+        icon_kind: if user_icon.is_some() {
+            IconKind::User
+        } else {
+            IconKind::Letter
+        },
+        icon: user_icon,
+    };
+    if app.icon.is_none() {
+        if new.fetch_icon {
+            fetch_icon(&mut app);
+        } else {
+            use_letter_icon(&mut app);
+        }
+    }
+    if let Some(dir) = app.profile_dir() {
+        let _ = fs::create_dir_all(dir);
+    }
+    desktop(&app);
+    apps.push(app.clone());
+    app
+}
+
 fn create(args: &[String]) {
     let (name, url) = match positionals(args).as_slice() {
         [url] if validate_url(url).is_ok() => {
@@ -661,54 +808,274 @@ fn create(args: &[String]) {
     };
     validate_name(&name).unwrap_or_else(|e| fail(&e));
     validate_url(&url).unwrap_or_else(|e| fail(&e));
+    let profile = profile_mode_from_args(args)
+        .unwrap_or_else(|e| fail(&e))
+        .unwrap_or(Profile::Isolated);
     let browser =
         find_browser(parse_value(args, "--browser").as_deref()).unwrap_or_else(|e| die(&e));
-    let shared_profile = args.iter().any(|arg| arg == "--shared-profile");
     let mut apps = load();
-    let base = slug(&name);
-    let mut id = base.clone();
-    let mut n = 2;
-    while apps.iter().any(|app| app.id == id) {
-        id = format!("{base}-{n}");
-        n += 1;
-    }
-    let user_icon =
-        parse_value(args, "--icon").map(|source| install_icon(Path::new(&source), &id, None));
-    let mut app = App {
-        id,
-        name,
-        url,
-        browser,
-        shared_profile,
-        icon_kind: if user_icon.is_some() {
-            IconKind::User
-        } else {
-            IconKind::Letter
+    let icon = parse_value(args, "--icon");
+    let app = create_app(
+        &mut apps,
+        NewApp {
+            name,
+            url,
+            browser,
+            profile,
+            icon: icon.as_deref(),
+            fetch_icon: args.iter().any(|arg| arg == "--fetch-icon"),
         },
-        icon: user_icon,
-    };
-    if app.icon.is_none() {
-        if args.iter().any(|arg| arg == "--fetch-icon") {
-            fetch_icon(&mut app);
-        } else {
-            use_letter_icon(&mut app);
-        }
-    }
-    if !app.shared_profile {
-        let _ = fs::create_dir_all(profiles_dir().join(&app.id));
-    }
-    desktop(&app);
-    apps.push(app.clone());
+    );
     paint_letter_icons(&apps);
     save(&apps);
     mark_state_current();
     println!("created {} ({})", app.name, app.id);
-    if !app.shared_profile && is_microsoft_365(&app.url) {
+    if app.profile == Profile::Isolated && is_microsoft_365(&app.url) {
         println!(
             "hint: Microsoft 365 sign-in usually needs the browser session: `niruwebapp edit {} --shared-profile`, and allow third-party cookies for [*.]cloud.microsoft, [*.]microsoftonline.com and the other sites in the README.",
             app.id
         );
     }
+}
+
+/// The catalogue entry a webapp's address belongs to, if any.
+fn catalog_key(url: &str) -> Option<&'static str> {
+    catalog::ENTRIES
+        .iter()
+        .find(|entry| catalog::owns_url(entry, url))
+        .map(|entry| entry.key)
+}
+
+/// The installed webapp that already covers a catalogue entry.
+fn installed_for<'a>(apps: &'a [App], entry: &catalog::Entry) -> Option<&'a App> {
+    apps.iter()
+        .find(|app| catalog::owns_url(entry, &app.url))
+        .or_else(|| {
+            // An app of the user's own address (Nextcloud) is found by name.
+            entry
+                .url
+                .is_empty()
+                .then(|| apps.iter().find(|app| app.id == entry.key))
+                .flatten()
+        })
+}
+
+fn profile_of(entry: &catalog::Entry) -> Profile {
+    match entry.profile {
+        catalog::Profile::Isolated => Profile::Isolated,
+        catalog::Profile::Shared => Profile::Shared,
+        catalog::Profile::Group(group) => Profile::Group(group.into()),
+    }
+}
+
+fn profile_note(entry: &catalog::Entry) -> String {
+    match entry.profile {
+        catalog::Profile::Isolated => "own profile".into(),
+        catalog::Profile::Shared => "browser profile".into(),
+        catalog::Profile::Group(group) => format!("{group} profile"),
+    }
+}
+
+/// `catalog [SET...] [--tsv | --json]`: the built-in web apps, marked when
+/// one is already installed.
+fn catalog_command(args: &[String]) {
+    let apps = load();
+    let wanted = positionals(args);
+    for name in &wanted {
+        if !catalog::is_set(name) {
+            fail(&format!("unknown set: {name} (sets: {})", set_names()));
+        }
+    }
+    let shown = |set: &str| wanted.is_empty() || wanted.iter().any(|name| name == set);
+    if args.iter().any(|arg| arg == "--tsv") {
+        for entry in catalog::ENTRIES.iter().filter(|entry| shown(entry.set)) {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                entry.key,
+                entry.set,
+                entry.name,
+                if entry.url.is_empty() { "-" } else { entry.url },
+                profile_of(entry).label(),
+                installed_for(&apps, entry).map_or("-", |app| app.id.as_str())
+            );
+        }
+        return;
+    }
+    if args.iter().any(|arg| arg == "--json") {
+        let mut out = String::from("[");
+        for (index, entry) in catalog::ENTRIES
+            .iter()
+            .filter(|entry| shown(entry.set))
+            .enumerate()
+        {
+            out.push_str(if index == 0 { "\n  " } else { ",\n  " });
+            out.push_str(&format!(
+                "{{\"key\": {}, \"set\": {}, \"name\": {}, \"url\": {}, \"profile\": {}, \"installed\": {}}}",
+                json_string(entry.key),
+                json_string(entry.set),
+                json_string(entry.name),
+                if entry.url.is_empty() { "null".into() } else { json_string(entry.url) },
+                json_string(&profile_of(entry).label()),
+                installed_for(&apps, entry).map_or("null".into(), |app| json_string(&app.id)),
+            ));
+        }
+        out.push_str("\n]\n");
+        print!("{out}");
+        return;
+    }
+    for (set, about) in catalog::SETS.iter().filter(|(set, _)| shown(set)) {
+        println!("{set}: {about}");
+        for entry in catalog::set_entries(set) {
+            let have = installed_for(&apps, entry);
+            println!(
+                "  {} {:<17} {:<17} {}  ({})",
+                if have.is_some() { "*" } else { " " },
+                entry.key,
+                entry.name,
+                if entry.url.is_empty() {
+                    "your own address"
+                } else {
+                    entry.url
+                },
+                profile_note(entry)
+            );
+        }
+    }
+    println!();
+    println!("* already installed. Add with: niruwebapp add SET|KEY... (for example: niruwebapp add work claude)");
+}
+
+fn set_names() -> String {
+    catalog::SETS
+        .iter()
+        .map(|(set, _)| *set)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// An address the user typed for a catalogue app of their own (Nextcloud):
+/// `https://` is added when no scheme is given.
+fn own_url(text: &str) -> Result<String, String> {
+    let text = text.trim();
+    let url = if text.contains("://") {
+        text.to_string()
+    } else {
+        format!("https://{text}")
+    };
+    validate_url(&url)?;
+    if class::url_parts(&url).is_none() {
+        return Err(format!("not a web address: {text}"));
+    }
+    Ok(url)
+}
+
+/// `add SET|KEY... [--url URL] [--dry-run] [--fetch-icon] [--browser PATH]`:
+/// add catalogue apps that are not installed yet. Never touches existing
+/// webapps.
+fn add_command(args: &[String]) {
+    let words = positionals(args);
+    if words.is_empty() {
+        fail(&format!(
+            "add needs a set or an app (sets: {}; see niruwebapp catalog)",
+            set_names()
+        ));
+    }
+    let mut entries: Vec<&catalog::Entry> = Vec::new();
+    for word in &words {
+        let found: Vec<&catalog::Entry> = match catalog::get(word) {
+            Some(entry) => vec![entry],
+            None if catalog::is_set(word) => catalog::set_entries(word).collect(),
+            None => fail(&format!(
+                "unknown app or set: {word} (see niruwebapp catalog)"
+            )),
+        };
+        for entry in found {
+            if !entries.iter().any(|known| known.key == entry.key) {
+                entries.push(entry);
+            }
+        }
+    }
+    let given_url = parse_value(args, "--url");
+    if args.iter().any(|arg| arg == "--url") && given_url.is_none() {
+        fail("--url needs an address");
+    }
+    if given_url.is_some() && entries.iter().filter(|entry| entry.url.is_empty()).count() != 1 {
+        fail("--url is the address of nextcloud; add it on its own: niruwebapp add nextcloud --url URL");
+    }
+    let dry_run = args.iter().any(|arg| arg == "--dry-run");
+    let fetch = args.iter().any(|arg| arg == "--fetch-icon");
+    let mut apps = load();
+    let mut browser = None;
+    let mut added = 0;
+    for entry in entries {
+        if let Some(app) = installed_for(&apps, entry) {
+            println!("have {} ({})", entry.name, app.id);
+            continue;
+        }
+        let url = if entry.url.is_empty() {
+            let typed = match &given_url {
+                Some(url) => Some(url.clone()),
+                None => ask(entry.ask),
+            };
+            match typed.filter(|text| !text.trim().is_empty()) {
+                Some(text) => own_url(&text).unwrap_or_else(|e| fail(&e)),
+                None => {
+                    println!(
+                        "skip {}: no address (niruwebapp add {} --url URL)",
+                        entry.name, entry.key
+                    );
+                    continue;
+                }
+            }
+        } else {
+            entry.url.to_string()
+        };
+        if dry_run {
+            println!(
+                "would add {} {}  ({})",
+                entry.name,
+                url,
+                profile_note(entry)
+            );
+            continue;
+        }
+        let browser = browser
+            .get_or_insert_with(|| {
+                find_browser(parse_value(args, "--browser").as_deref()).unwrap_or_else(|e| die(&e))
+            })
+            .clone();
+        let app = create_app(
+            &mut apps,
+            NewApp {
+                name: entry.name.to_string(),
+                url,
+                browser,
+                profile: profile_of(entry),
+                icon: None,
+                fetch_icon: fetch,
+            },
+        );
+        println!("added {} ({})", app.name, app.id);
+        added += 1;
+    }
+    if added > 0 {
+        paint_letter_icons(&apps);
+        save(&apps);
+        mark_state_current();
+    }
+}
+
+/// One line from the terminal, or None when this is not an interactive run.
+fn ask(question: &str) -> Option<String> {
+    use std::io::{IsTerminal, Write};
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        return None;
+    }
+    eprint!("{question} (empty skips): ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).ok()?;
+    Some(answer.trim().to_string())
 }
 
 /// A second launch within this window, with no window mapped yet, is taken
@@ -793,16 +1160,19 @@ fn launch_command(apps: &mut Vec<App>, args: &[String]) {
 }
 
 fn launch(app: &App) {
-    let profile = profiles_dir().join(&app.id);
-    let _ = fs::create_dir_all(&profile);
     let mut command = Command::new(&app.browser);
+    let class = match &app.profile {
+        Profile::Group(group) => class::group_class(group),
+        _ => class::isolated_class(&app.id),
+    };
     command.args([
         format!("--app={}", class::ascii_url(&app.url)),
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
-        format!("--class=niruwebapp-{}", app.id),
+        format!("--class={class}"),
     ]);
-    if !app.shared_profile {
+    if let Some(profile) = app.profile_dir() {
+        let _ = fs::create_dir_all(&profile);
         command.arg(format!("--user-data-dir={}", profile.display()));
     }
     command
@@ -841,6 +1211,19 @@ fn profile_in_use(profile: &std::path::Path) -> bool {
     false
 }
 
+/// The other webapps that use the same group profile.
+fn group_members<'a>(apps: &'a [App], app: &App) -> Vec<&'a str> {
+    match &app.profile {
+        Profile::Group(group) => apps
+            .iter()
+            .filter(|other| other.id != app.id)
+            .filter(|other| other.profile == Profile::Group(group.clone()))
+            .map(|other| other.name.as_str())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn remove(args: &[String]) {
     let query = args
         .first()
@@ -850,9 +1233,11 @@ fn remove(args: &[String]) {
     let Some(index) = find(&apps, &query) else {
         die(&format!("webapp not found: {query}"))
     };
-    let delete_profile = args.iter().any(|arg| arg == "--delete-profile");
-    let profile = profiles_dir().join(&apps[index].id);
-    let plan = remove_plan(&apps[index], &profile, delete_profile);
+    let others = group_members(&apps, &apps[index]);
+    // A group profile is only deleted with its last webapp.
+    let delete_profile = args.iter().any(|arg| arg == "--delete-profile") && others.is_empty();
+    let profile = apps[index].profile_dir();
+    let plan = remove_plan(&apps[index], profile.as_deref(), delete_profile, &others);
     if args.iter().any(|arg| arg == "--dry-run") {
         print!("{plan}");
         return;
@@ -871,15 +1256,15 @@ fn remove(args: &[String]) {
             return;
         }
     }
-    if delete_profile {
-        if profile_in_use(&profile) {
+    if let Some(profile) = profile.as_deref().filter(|_| delete_profile) {
+        if profile_in_use(profile) {
             die(&format!(
                 "profile is in use by a running webapp; close it and retry: {}",
                 profile.display()
             ));
         }
         if profile.exists() {
-            fs::remove_dir_all(&profile).unwrap_or_else(|e| {
+            fs::remove_dir_all(profile).unwrap_or_else(|e| {
                 die(&format!("cannot remove profile {}: {e}", profile.display()))
             });
         }
@@ -922,7 +1307,12 @@ fn human_size(bytes: u64) -> String {
 }
 
 /// What `remove` will delete, and what it keeps.
-fn remove_plan(app: &App, profile: &Path, delete_profile: bool) -> String {
+fn remove_plan(
+    app: &App,
+    profile: Option<&Path>,
+    delete_profile: bool,
+    group_others: &[&str],
+) -> String {
     let mut plan = format!("Removing webapp {} ({}):\n", app.name, app.id);
     plan.push_str(&format!(
         "  delete desktop entry {}\n",
@@ -935,22 +1325,24 @@ fn remove_plan(app: &App, profile: &Path, delete_profile: bool) -> String {
     {
         plan.push_str(&format!("  delete icon {icon}\n"));
     }
-    let size = || human_size(tree_size(profile));
-    if delete_profile && profile.exists() {
-        plan.push_str(&format!(
+    match profile {
+        Some(profile) if !group_others.is_empty() => plan.push_str(&format!(
+            "  keep group profile {} (also used by {})\n",
+            profile.display(),
+            group_others.join(", ")
+        )),
+        Some(profile) if delete_profile && profile.exists() => plan.push_str(&format!(
             "  delete profile {} ({})\n",
             profile.display(),
-            size()
-        ));
-    } else if profile.exists() {
-        plan.push_str(&format!(
+            human_size(tree_size(profile))
+        )),
+        Some(profile) if profile.exists() => plan.push_str(&format!(
             "  keep profile {} ({}; --delete-profile removes it)\n",
             profile.display(),
-            size()
-        ));
-    }
-    if app.shared_profile {
-        plan.push_str("  keep the browser's shared profile (never touched)\n");
+            human_size(tree_size(profile))
+        )),
+        Some(_) => {}
+        None => plan.push_str("  keep the browser's shared profile (never touched)\n"),
     }
     plan
 }
@@ -1010,17 +1402,17 @@ fn edit(args: &[String]) {
     }
     let mut profile_changed = false;
     match profile_mode_from_args(args) {
-        Ok(Some(shared)) => {
-            if shared != apps[index].shared_profile {
-                apps[index].shared_profile = shared;
+        Ok(Some(profile)) => {
+            if profile != apps[index].profile {
+                apps[index].profile = profile;
                 profile_changed = true;
             }
-            if !shared {
-                let _ = fs::create_dir_all(profiles_dir().join(&apps[index].id));
+            if let Some(dir) = apps[index].profile_dir() {
+                let _ = fs::create_dir_all(dir);
             }
         }
         Ok(None) => {}
-        Err(message) => fail(message),
+        Err(message) => fail(&message),
     }
     paint_letter_icons(&apps);
     desktop(&apps[index]);
@@ -1062,6 +1454,8 @@ fn main() {
         "edit" => edit(&args[1..]),
         "icon" => set_icon(&args[1..]),
         "doctor" => doctor(&apps),
+        "catalog" => catalog_command(&args[1..]),
+        "add" => add_command(&args[1..]),
         "refresh" => {
             refresh_apps(&mut apps);
             mark_state_current();
@@ -1175,14 +1569,49 @@ mod tests {
         assert_eq!(profile_mode_from_args(&args(&[])), Ok(None));
         assert_eq!(
             profile_mode_from_args(&args(&["--shared-profile"])),
-            Ok(Some(true))
+            Ok(Some(Profile::Shared))
         );
         assert_eq!(
             profile_mode_from_args(&args(&["--isolated-profile"])),
-            Ok(Some(false))
+            Ok(Some(Profile::Isolated))
         );
+        assert_eq!(
+            profile_mode_from_args(&args(&["--profile-group", "google"])),
+            Ok(Some(Profile::Group("google".into())))
+        );
+        assert!(profile_mode_from_args(&args(&["--profile-group"])).is_err());
+        assert!(profile_mode_from_args(&args(&["--profile-group", "Bad Name"])).is_err());
         assert!(
             profile_mode_from_args(&args(&["--shared-profile", "--isolated-profile"])).is_err()
         );
+        assert!(
+            profile_mode_from_args(&args(&["--shared-profile", "--profile-group", "x"])).is_err()
+        );
+    }
+
+    #[test]
+    fn profile_state_round_trips() {
+        for profile in [
+            Profile::Isolated,
+            Profile::Shared,
+            Profile::Group("proton".into()),
+        ] {
+            assert_eq!(Profile::from_state(&profile.as_state()), profile);
+        }
+        assert_eq!(Profile::from_state("group:../x"), Profile::Isolated);
+        assert_eq!(Profile::from_state(""), Profile::Isolated);
+    }
+
+    #[test]
+    fn own_addresses_get_a_scheme() {
+        assert_eq!(
+            own_url(" cloud.example.com ").as_deref(),
+            Ok("https://cloud.example.com")
+        );
+        assert_eq!(
+            own_url("http://nas.local:8080/").as_deref(),
+            Ok("http://nas.local:8080/")
+        );
+        assert!(own_url("ftp://x").is_err());
     }
 }

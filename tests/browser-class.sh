@@ -31,10 +31,18 @@ sleep 4
 "$BIN" create Mail 'https://example.com/mail/' --shared-profile --browser "$BROWSER" >/dev/null
 "$BIN" create Idn 'https://bücher.example/' --shared-profile --browser "$BROWSER" >/dev/null
 "$BIN" create Iso 'https://example.net/a/b.c?q=1' --browser "$BROWSER" >/dev/null
-for app in mail idn iso; do "$BIN" launch "$app"; done
+# Two webapps in one profile group: the second joins the first one's browser
+# process, and both windows carry the group class.
+"$BIN" create One 'https://example.org/one/' --profile-group test --browser "$BROWSER" >/dev/null
+"$BIN" create Two 'https://example.org/two/' --profile-group test --browser "$BROWSER" >/dev/null
+for app in mail idn iso one; do "$BIN" launch "$app"; done
+sleep 3
+"$BIN" launch two
 want='mail	shared	example.com__mail	1
 idn	shared	xn--bcher-kva.example	1
-iso	isolated	niruwebapp-iso	1'
+iso	isolated	niruwebapp-iso	1
+one	group:test	example.org__one	1
+two	group:test	example.org__two	1'
 i=0
 while :; do
   got=$("$BIN" doctor | awk -F '\t' 'NR > 1 && NF == 6 { print $1 "\t" $2 "\t" $3 "\t" $4 }')
@@ -48,4 +56,13 @@ while :; do
   sleep 0.5
 done
 "$BIN" doctor
+# One browser process serves the whole group.
+group_procs=$(pgrep -f -- "--user-data-dir=$XDG_DATA_HOME/niruwebapp/profiles/@test" | while read -r p; do
+  # Child processes (renderer, zygote, crashpad) carry --type=; some rewrite
+  # their command line into one string, so match anywhere.
+  tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- '--type=\|crashpad' || echo "$p"; done | wc -l)
+[ "$group_procs" -le 1 ] || { echo "group profile has $group_procs browser processes"; exit 1; }
+"$BIN" launch two
+sleep 1
+"$BIN" doctor | awk -F '\t' '$1 == "two" { exit !($4 == 1) }' || { echo 'second launch of a group app opened another window'; exit 1; }
 echo "PASS: real browser window classes match ($("$BROWSER" --version 2>/dev/null | head -1))"

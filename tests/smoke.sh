@@ -21,7 +21,7 @@ wait_for_launch() {
   echo "browser launch did not produce argument line $want" >&2
   return 1
 }
-"$BIN" --version | grep -qx 'NIRUWEBAPP 0.2.0'
+"$BIN" --version | grep -qx 'NIRUWEBAPP 0.3.0'
 printf '\211PNG\r\n\032\n' > "$T/icon.png"
 "$BIN" create 'Example App' 'https://example.com' --icon "$T/icon.png"
 [ -f "$T/data/applications/niruwebapp-example-app.desktop" ]
@@ -109,4 +109,43 @@ grep -q 'without --yes' "$T/err"
 [ -d "$T/data/niruwebapp/profiles/example-app" ]
 [ ! -e "$T/data/applications/niruwebapp-example-app.desktop" ]
 [ ! -e "$T/data/icons/hicolor/128x128/apps/niruwebapp-example-app.png" ]
+
+# Catalogue: sets, existing apps recognised, groups, Nextcloud, moved addresses.
+"$BIN" create gemini https://gemini.google.com >/dev/null
+"$BIN" create notebook https://notebooklm.google.com/ >/dev/null
+"$BIN" catalog --tsv > "$T/cat"
+awk -F '\t' '$1 == "gemini" && $6 == "gemini" { f = 1 } END { exit !f }' "$T/cat"
+awk -F '\t' '$1 == "teams" && $5 == "shared" && $6 == "-" { f = 1 } END { exit !f }' "$T/cat"
+"$BIN" catalog work | grep -q '^work: Microsoft 365'
+if "$BIN" catalog nosuchset 2>/dev/null; then echo 'unknown set accepted' >&2; exit 1; fi
+if "$BIN" add nosuchapp 2>/dev/null; then echo 'unknown app accepted' >&2; exit 1; fi
+"$BIN" add google ai --dry-run > "$T/out"
+grep -qx 'have Gemini (gemini)' "$T/out"
+grep -q '^would add Gmail https://mail.google.com/  (google profile)$' "$T/out"
+[ ! -e "$T/data/applications/niruwebapp-gmail.desktop" ]
+"$BIN" add google nextcloud < /dev/null > "$T/out"
+grep -qx 'added Gmail (gmail)' "$T/out"
+grep -q '^skip Nextcloud: no address' "$T/out"
+"$BIN" add google | grep -qx 'have Gmail (gmail)'
+awk -F '\t' '$1 == "google-drive" && $5 == "group:google" { f = 1 } END { exit !f }' "$T/data/niruwebapp/apps.tsv"
+grep -qx 'StartupWMClass=mail.google.com' "$T/data/applications/niruwebapp-gmail.desktop"
+"$BIN" launch gmail
+wait_for_launch 5
+tail -n 1 "$HOME/browser-args" | grep -q -- '--class=niruwebapp@google --user-data-dir=.*/profiles/@google$'
+"$BIN" remove gmail --delete-profile --dry-run | grep -q '^  keep group profile .*/profiles/@google (also used by Google Calendar, Google Drive)$'
+"$BIN" add nextcloud --url cloud.example.org | grep -qx 'added Nextcloud (nextcloud)'
+"$BIN" list | grep -q '^nextcloud.Nextcloud.https://cloud.example.org$'
+"$BIN" add nextcloud --url https://other.example.org | grep -qx 'have Nextcloud (nextcloud)'
+if "$BIN" add work --url https://x.example 2>/dev/null; then echo '--url without nextcloud accepted' >&2; exit 1; fi
+"$BIN" refresh 2> "$T/err" >/dev/null
+grep -q 'notebook moved from https://notebooklm.google.com/ to https://notebook.google.com/' "$T/err"
+"$BIN" list | grep -q '^notebook.notebook.https://notebook.google.com/$'
+"$BIN" list --json | grep -q '"id": "gmail", "name": "Gmail", "url": "https://mail.google.com/", "profile": "group", "profile_group": "google", "catalog": "gmail"'
+"$BIN" edit gmail --isolated-profile >/dev/null
+awk -F '\t' '$1 == "gmail" && $5 == "profile" { f = 1 } END { exit !f }' "$T/data/niruwebapp/apps.tsv"
+"$BIN" edit gmail --profile-group google >/dev/null
+awk -F '\t' '$1 == "gmail" && $5 == "group:google" { f = 1 } END { exit !f }' "$T/data/niruwebapp/apps.tsv"
+for a in gmail google-calendar google-drive nextcloud gemini notebook; do "$BIN" remove "$a" --delete-profile --yes >/dev/null; done
+[ ! -e "$T/data/niruwebapp/profiles/@google" ]
+
 echo 'PASS: create/list/launch/edit/remove, profile modes and browser args'

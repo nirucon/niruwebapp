@@ -15,6 +15,14 @@ background service.
 ## Features
 
 - Create, list, launch, edit and remove web apps from the command line.
+- A built-in catalogue of well-known web apps in sets (Microsoft 365, AI,
+  Google, Proton, media, your own Nextcloud): `niruwebapp add work ai` adds
+  them with a checked address and the profile that signs in best, and skips
+  what you already have.
+- Profile groups: the Google apps share one sign-in, the Proton apps another,
+  apart from your ordinary browsing.
+- A service that changes address (NotebookLM became Gemini Notebook) is moved
+  to the new one by `refresh`.
 - An isolated browser profile per web app, or the browser's ordinary profile
   with `--shared-profile` (useful for Microsoft 365); switching is
   non-destructive.
@@ -58,7 +66,11 @@ cd niruwebapp
 ## Usage
 
 ```sh
+niruwebapp catalog
+niruwebapp add work ai media
+niruwebapp add nextcloud --url cloud.example.com
 niruwebapp create "YouTube Music" https://music.youtube.com
+niruwebapp create "Google Keep" https://keep.google.com --profile-group google
 niruwebapp create https://teams.cloud.microsoft/ --shared-profile   # name: Teams
 niruwebapp list
 niruwebapp list --json
@@ -78,10 +90,12 @@ niruwebapp remove youtube-music --delete-profile --yes
 
 | Command | Options |
 |---|---|
-| `create [NAME] URL` | `--browser PATH`, `--shared-profile`, `--icon PATH` or `--fetch-icon` |
+| `create [NAME] URL` | `--browser PATH`, `--shared-profile` or `--profile-group NAME`, `--icon PATH` or `--fetch-icon` |
+| `catalog [SET...]` | `--tsv`, `--json` |
+| `add SET\|KEY...` | `--url URL` (Nextcloud), `--dry-run`, `--fetch-icon`, `--browser PATH` |
 | `list` | `--json` |
 | `launch ID\|NAME` | `--new-window` |
-| `edit ID\|NAME` | `--name NAME`, `--url URL`, `--icon PATH` or `--fetch-icon`, `--shared-profile` or `--isolated-profile` |
+| `edit ID\|NAME` | `--name NAME`, `--url URL`, `--icon PATH` or `--fetch-icon`, `--shared-profile`, `--isolated-profile` or `--profile-group NAME` |
 | `icon ID\|NAME PATH` | Set your own icon |
 | `remove ID\|NAME` | `--delete-profile`, `--dry-run` or `--yes` |
 | `refresh` | Redraw letter icons and rewrite desktop entries (for example after a theme change) |
@@ -91,6 +105,32 @@ Without a name, `create` names the web app after its host
 (`teams.cloud.microsoft` becomes "Teams"). For Microsoft 365 hosts it suggests
 `--shared-profile`; it never switches the mode by itself.
 
+### Catalogue
+
+`niruwebapp catalog` lists the built-in web apps by set and marks the ones you
+already have (an existing web app counts when its address is the same service,
+so a `gemini` you made by hand is not added twice). `niruwebapp add` takes sets
+and app keys in any mix and never changes an existing web app.
+
+| Set | Apps | Profile |
+|---|---|---|
+| `work` | Teams, Outlook, Outlook Calendar, Copilot (Microsoft 365), Loop, Planner, OneDrive | the browser's own (Microsoft 365 sign-in) |
+| `ai` | Claude, ChatGPT, Grok; Gemini, Gemini Notebook | own; Google group |
+| `google` | Gmail, Google Calendar, Google Drive | Google group |
+| `proton` | Proton Mail, Calendar, Drive, Pass | Proton group |
+| `media` | YouTube, YouTube Music; SVT Play | Google group; own |
+| `other` | Spotify, Discord, GitHub, Excalidraw | own |
+| `nextcloud` | Your own Nextcloud: `--url`, or asked on a terminal | own |
+
+The addresses are the current ones (checked 2026-11-20), for example
+`teams.cloud.microsoft`, `outlook.cloud.microsoft/mail/`, `m365.cloud.microsoft`
+(where `microsoft365.com` leads), `notebook.google.com` and `mail.proton.me`.
+Each entry also knows the addresses its service used before. `niruwebapp
+refresh`, which NIRUX runs on every update, moves a web app that still uses
+an old address (such as `outlook.office.com/mail/` or `notebooklm.google.com`)
+to the current one. NIRUX also checks the addresses of your installed web
+apps once a week (`nirux webapps check`).
+
 ### Profiles
 
 Each web app gets an ordinary desktop entry and, by default, a dedicated
@@ -99,6 +139,13 @@ so sign-in follows the normal browser session; the trade-off is that cookies and
 sessions are shared with normal browsing. `edit --shared-profile` and
 `edit --isolated-profile` switch an existing web app; the old profile is kept on
 disk so switching back is non-destructive. Restart the web app after switching.
+
+`--profile-group NAME` puts several web apps in one profile of their own: you
+sign in once for the group, and the group stays apart from normal browsing.
+The catalogue uses the groups `google` and `proton`. All windows of a group run
+in one browser process with the class `niruwebapp@NAME`; each web app is told
+apart by its instance name, which the desktop entry declares. Removing a web
+app keeps the group profile while other web apps use it.
 
 ### Windows and window classes
 
@@ -110,6 +157,7 @@ is ignored. `--new-window` always opens a new window.
 |---|---|---|
 | isolated | `niruwebapp-<id>` | `claude.ai`, `niruwebapp-claude` |
 | shared | host and path, `/` as `__` | `outlook.cloud.microsoft__mail`, `Helium` |
+| group | host and path, `/` as `__` | `mail.google.com`, `niruwebapp@google` |
 
 A shared-profile web app usually joins the browser that is already running, and
 Chromium then ignores `--class`; the instance name derived from the URL is the
@@ -144,6 +192,7 @@ updates the record.
 |---|---|
 | `~/.local/share/niruwebapp/apps.tsv` | The list of web apps |
 | `~/.local/share/niruwebapp/profiles/<id>/` | Isolated browser profiles |
+| `~/.local/share/niruwebapp/profiles/@<group>/` | Group profiles |
 | `~/.local/share/applications/niruwebapp-<id>.desktop` | Desktop entries |
 | `~/.local/share/icons/hicolor/128x128/apps/niruwebapp-<id>.png` | Icons |
 | `~/.local/share/niruwebapp/backup-0.1/` | One-time backup made when upgrading from 0.1 |
